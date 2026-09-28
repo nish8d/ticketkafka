@@ -1,0 +1,26 @@
+[project]
+name = "ticket-pipeline"
+version = "0.1.0"
+description = "Learning Kafka with an LLM-generated support-ticket pipeline"
+requires-python = ">=3.12"
+dependencies = [
+    "confluent-kafka>=2.15",
+    "ollama>=0.6",
+    "pydantic>=2.13",
+]
+
+[dependency-groups]
+dev = ["pytest>=9.1"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/pipeline"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = ["integration: needs the docker compose Kafka broker running"]
+# Unit tests by default; `uv run pytest -m integration` runs the integration suite.
+addopts = "-m 'not integration' --import-mode=importlib"

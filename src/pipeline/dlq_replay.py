@@ -68,12 +68,17 @@ def run_replay(consumer, producer, dlq_topic: str, limit: int | None = None, dry
 
     try:
         snapshot_highs, next_offsets = snapshot_dlq(consumer, dlq_topic)
+        if not snapshot_highs:
+            log.warning("topic %r has no partitions (does it exist? run `uv run python -m "
+                       "pipeline.admin` first); nothing to replay", dlq_topic)
         consumer.subscribe([dlq_topic])
         last_message_at = time.monotonic()
         while (limit is None or stats.seen < limit) and not reached_snapshot(snapshot_highs, next_offsets):
             msg = consumer.poll(0.5)
             if msg is None:
                 if time.monotonic() - last_message_at > idle_timeout:
+                    log.warning("idle timeout (%.1fs) reached before catching up to the snapshot; "
+                               "some DLQ messages may remain unreplayed", idle_timeout)
                     break
                 continue
             if msg.error():

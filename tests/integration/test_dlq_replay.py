@@ -1,3 +1,4 @@
+import logging
 import time
 import uuid
 
@@ -110,3 +111,16 @@ def test_replay_stops_at_dlq_end_offsets_captured_at_start(make_topic, read_topi
     assert time.monotonic() - started < 3.0  # ended by the snapshot check, not the idle timeout
     assert (stats.seen, stats.replayed) == (1, 1)
     assert len(read_topic(dlq, 3, timeout=5.0)) == 2
+
+
+def test_replay_warns_when_dlq_topic_has_no_partitions(caplog):
+    # A topic that was never created (e.g. pipeline.admin was never run): list_topics comes
+    # back with no partitions for it, so there is nothing to replay.
+    missing_topic = f"test.dlq.missing.{uuid.uuid4().hex[:8]}"
+    group = f"test-replay-missing-{uuid.uuid4().hex[:8]}"
+
+    with caplog.at_level(logging.WARNING, logger="dlq_replay"):
+        stats = run_replay(Consumer(consumer_config(group)), Producer(producer_config()), missing_topic)
+
+    assert stats.seen == 0
+    assert any("no partitions" in record.message for record in caplog.records)

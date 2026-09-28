@@ -16,3 +16,15 @@ def producer_config() -> dict:
         # Same key -> partition hashing as the Java client (librdkafka's default differs).
         "partitioner": "murmur2_random",
     }
+
+
+def consumer_config(group_id: str) -> dict:
+    return {
+        "bootstrap.servers": config.BOOTSTRAP_SERVERS,
+        # Consumers with the same group.id share a topic's partitions between them.
+        "group.id": group_id,
+        # A brand-new group (no committed offsets yet) starts from the oldest message.
+        "auto.offset.reset": "earliest",
+        # We commit ourselves, only after our outputs are safely written: at-least-once.
+        "enable.auto.commit": False,
+    }

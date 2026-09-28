@@ -9,6 +9,34 @@ from pipeline.dlq_replay import run_replay
 pytestmark = pytest.mark.integration
 
 
+class ProducerWithFlushRemaining:
+    """Producer stub that simulates unacknowledged messages on flush."""
+
+    def __init__(self, flush_remaining):
+        self.flush_remaining = flush_remaining
+
+    def produce(self, topic, key=None, value=None, headers=None, on_delivery=None):
+        if on_delivery is not None:
+            on_delivery(None, None)
+
+    def flush(self, timeout=None):
+        return self.flush_remaining
+
+
+class ProducerWithDeliveryError:
+    """Producer stub that simulates delivery errors."""
+
+    def __init__(self, error_obj):
+        self.error_obj = error_obj
+
+    def produce(self, topic, key=None, value=None, headers=None, on_delivery=None):
+        if on_delivery is not None:
+            on_delivery(self.error_obj, None)
+
+    def flush(self, timeout=None):
+        return 0
+
+
 def test_replay_sends_messages_back_and_commits(make_topic, read_topic, fake_producer):
     dlq, target = make_topic("dlq"), make_topic("raw")
     producer = Producer(producer_config())
@@ -30,3 +58,37 @@ def test_replay_sends_messages_back_and_commits(make_topic, read_topic, fake_pro
 
     again = run_replay(Consumer(consumer_config(group)), Producer(producer_config()), dlq)
     assert again.seen == 0
+
+
+def test_replay_no_commit_when_flush_has_remaining(make_topic):
+    dlq, target = make_topic("dlq"), make_topic("target")
+    producer = Producer(producer_config())
+    producer.produce(dlq, key=b"C-0001", value=b"msg", headers=[("source.topic", target.encode())])
+    assert producer.flush(10) == 0
+    group = f"test-replay-flush-{uuid.uuid4().hex[:8]}"
+
+    # Simulate unacknowledged messages by returning flush_remaining > 0
+    failing_producer = ProducerWithFlushRemaining(flush_remaining=1)
+    with pytest.raises(RuntimeError, match="not acknowledged"):
+        run_replay(Consumer(consumer_config(group)), failing_producer, dlq)
+
+    # Verify the message was not consumed (offset not committed)
+    retry = run_replay(Consumer(consumer_config(group)), Producer(producer_config()), dlq, dry_run=True)
+    assert retry.seen == 1
+
+
+def test_replay_no_commit_when_delivery_fails(make_topic):
+    dlq, target = make_topic("dlq"), make_topic("target")
+    producer = Producer(producer_config())
+    producer.produce(dlq, key=b"C-0001", value=b"msg", headers=[("source.topic", target.encode())])
+    assert producer.flush(10) == 0
+    group = f"test-replay-delivery-{uuid.uuid4().hex[:8]}"
+
+    # Simulate delivery error
+    failing_producer = ProducerWithDeliveryError(error_obj=Exception("broker error"))
+    with pytest.raises(RuntimeError, match="not acknowledged"):
+        run_replay(Consumer(consumer_config(group)), failing_producer, dlq)
+
+    # Verify the message was not consumed (offset not committed)
+    retry = run_replay(Consumer(consumer_config(group)), Producer(producer_config()), dlq, dry_run=True)
+    assert retry.seen == 1

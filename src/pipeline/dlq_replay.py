@@ -31,6 +31,12 @@ def run_replay(consumer, producer, dlq_topic: str, limit: int | None = None, dry
                idle_timeout: float = 10.0) -> ReplayStats:
     """Replay DLQ messages until `limit` is reached or nothing arrives for `idle_timeout` seconds."""
     stats = ReplayStats()
+    delivery_errors: list = []
+
+    def on_delivery(err, msg):
+        if err is not None:
+            delivery_errors.append(err)
+
     consumer.subscribe([dlq_topic])
     try:
         last_message_at = time.monotonic()
@@ -56,13 +62,19 @@ def run_replay(consumer, producer, dlq_topic: str, limit: int | None = None, dry
             else:
                 origin = f"{msg.topic()}:{msg.partition()}:{msg.offset()}"
                 producer.produce(target, key=msg.key(), value=msg.value(),
-                                 headers=[("replayed.from", origin.encode())])
+                                 headers=[("replayed.from", origin.encode())], on_delivery=on_delivery)
             stats.replayed += 1
 
         # Dry runs commit nothing, so a real run afterwards still sees every message.
         if not dry_run and stats.seen:
-            if producer.flush(30):
-                raise RuntimeError("replayed messages not acknowledged; offsets not committed")
+            # Wait until every replayed message is acknowledged by the broker...
+            remaining = producer.flush(30)
+            if remaining or delivery_errors:
+                # Crash WITHOUT committing: on restart the whole batch is read again.
+                raise RuntimeError(f"replayed messages not acknowledged ({remaining} pending, "
+                                   f"errors: {delivery_errors}); offsets not committed")
+            # ...then commit the DLQ offsets. A crash between flush and commit means the batch is
+            # replayed twice (duplicates) — never lost. That's at-least-once.
             consumer.commit(asynchronous=False)
     finally:
         consumer.close()

@@ -1,3 +1,4 @@
+import time
 import uuid
 
 import pytest
@@ -92,3 +93,20 @@ def test_replay_no_commit_when_delivery_fails(make_topic):
     # Verify the message was not consumed (offset not committed)
     retry = run_replay(Consumer(consumer_config(group)), Producer(producer_config()), dlq, dry_run=True)
     assert retry.seen == 1
+
+
+def test_replay_stops_at_dlq_end_offsets_captured_at_start(make_topic, read_topic):
+    # The message's source.topic is the DLQ itself, so every replay lands back in the DLQ: a
+    # deterministic version of "a live validator dead-letters the replayed message again".
+    dlq = make_topic("dlq")
+    producer = Producer(producer_config())
+    producer.produce(dlq, key=b"C-0001", value=b"loop", headers=[("source.topic", dlq.encode())])
+    assert producer.flush(10) == 0
+    group = f"test-replay-loop-{uuid.uuid4().hex[:8]}"
+
+    started = time.monotonic()
+    stats = run_replay(Consumer(consumer_config(group)), Producer(producer_config()), dlq,
+                       idle_timeout=3.0)
+    assert time.monotonic() - started < 3.0  # ended by the snapshot check, not the idle timeout
+    assert (stats.seen, stats.replayed) == (1, 1)
+    assert len(read_topic(dlq, 3, timeout=5.0)) == 2

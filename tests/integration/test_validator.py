@@ -66,3 +66,20 @@ def test_validator_does_not_commit_when_outputs_are_not_acknowledged(make_topic,
 
     # Nothing committed (negative = no committed offset), so a restart re-reads the message.
     assert _committed(group, raw, 1)[0] < 0
+
+
+def test_validator_does_not_commit_when_delivery_fails(make_topic, fake_producer, ticket_dict):
+    raw = make_topic("raw")
+    group = f"test-validator-{uuid.uuid4().hex[:8]}"
+    producer = Producer(producer_config())
+    producer.produce(raw, key=b"C-0042", value=json.dumps(ticket_dict).encode())
+    assert producer.flush(10) == 0
+
+    fake_producer.delivery_error = Exception("broker rejected the write")  # simulate a failed delivery
+    deadline = time.monotonic() + 30
+    with pytest.raises(RuntimeError, match="not acknowledged"):
+        run_validator(Consumer(consumer_config(group)), fake_producer, raw, "unused.valid", "unused.dlq",
+                      should_stop=lambda: time.monotonic() > deadline)
+
+    # Nothing committed (negative = no committed offset), so a restart re-reads the message.
+    assert _committed(group, raw, 1)[0] < 0

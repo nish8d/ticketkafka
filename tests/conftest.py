@@ -38,17 +38,22 @@ class FakeMessage:
 
 
 class FakeProducer:
-    """Records produced messages. Set flush_remaining > 0 to simulate unacknowledged writes."""
+    """Records produced messages. Set flush_remaining > 0 to simulate unacknowledged writes.
+
+    Set delivery_error to a non-None object to simulate a delivery callback reporting failure
+    (e.g. the broker rejected the write) while still calling back with a message.
+    """
 
     def __init__(self):
         self.messages: list[FakeMessage] = []
         self.flush_remaining = 0
+        self.delivery_error = None
 
     def produce(self, topic, key=None, value=None, headers=None, on_delivery=None):
         msg = FakeMessage(topic, key, value, headers)
         self.messages.append(msg)
         if on_delivery is not None:
-            on_delivery(None, msg)
+            on_delivery(self.delivery_error, msg)
 
     def poll(self, timeout=0):
         return 0

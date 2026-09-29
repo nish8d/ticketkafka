@@ -4,7 +4,10 @@ import httpx
 import ollama
 import pytest
 
-from pipeline.llm import LLMError, TicketText, build_prompt, generate_ticket_text
+from pipeline.llm import (
+    Classification, LLMError, TicketText, build_classify_prompt, build_prompt, classify_ticket, generate_ticket_text,
+)
+from pipeline.models import Ticket
 
 
 class StubClient:
@@ -64,3 +67,50 @@ def test_unusable_output_raises_llm_error(content):
 def test_transport_failures_raise_llm_error(exc):
     with pytest.raises(LLMError, match="ollama call failed"):
         _call(StubClient(exc=exc))
+
+
+@pytest.fixture
+def ticket(ticket_dict) -> Ticket:
+    return Ticket.model_validate(ticket_dict)
+
+
+GOOD = '{"category": "billing", "priority": "high", "sentiment": -0.7, "summary": "Charged twice this month."}'
+
+
+def test_good_classification_parses(ticket):
+    result = classify_ticket(StubClient(GOOD), "test-model", ticket)
+    assert result == Classification(category="billing", priority="high", sentiment=-0.7,
+                                     summary="Charged twice this month.")
+
+
+def test_classification_is_deterministic_structured_and_quick(ticket):
+    client = StubClient(GOOD)
+    classify_ticket(client, "test-model", ticket)
+    kwargs = client.calls[0]
+    assert kwargs["format"] == Classification.model_json_schema()
+    assert kwargs["think"] is False
+    assert kwargs["options"]["temperature"] == 0  # same ticket, same answer: easier to reason about
+
+
+def test_classify_prompt_contains_the_ticket_and_the_allowed_values(ticket):
+    prompt = build_classify_prompt(ticket)
+    assert ticket.subject in prompt and ticket.body in prompt and ticket.product in prompt
+    for value in ("billing", "technical", "account", "other", "low", "medium", "high", "urgent"):
+        assert value in prompt
+
+
+@pytest.mark.parametrize("content", [
+    "not json",
+    '{"category": "sales", "priority": "high", "sentiment": 0, "summary": "s"}',
+    '{"category": "billing", "priority": "critical", "sentiment": 0, "summary": "s"}',
+    '{"category": "billing", "priority": "high", "sentiment": 5, "summary": "s"}',
+    '{"category": "billing", "priority": "high", "sentiment": 0, "summary": "  "}',
+])
+def test_unusable_classification_raises_llm_error(ticket, content):
+    with pytest.raises(LLMError, match="unusable output"):
+        classify_ticket(StubClient(content), "test-model", ticket)
+
+
+def test_unreachable_ollama_raises_llm_error_when_classifying(ticket):
+    with pytest.raises(LLMError, match="ollama call failed"):
+        classify_ticket(StubClient(exc=httpx.ConnectError("refused")), "test-model", ticket)

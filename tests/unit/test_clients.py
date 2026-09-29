@@ -26,3 +26,33 @@ def test_slow_consumers_rebalance_cooperatively_with_a_long_poll_interval():
     assert conf["partition.assignment.strategy"] == "cooperative-sticky"
     assert conf["max.poll.interval.ms"] == 600_000
     assert conf["group.id"] == "enricher"
+
+
+class _Consumer:
+    def __init__(self, exc=None):
+        self.exc, self.commits = exc, 0
+
+    def commit(self, asynchronous=True):
+        self.commits += 1
+        if self.exc is not None:
+            raise self.exc
+
+
+def test_commit_batch_commits_synchronously():
+    from pipeline.clients import commit_batch
+
+    consumer = _Consumer()
+    assert commit_batch(consumer) is True
+    assert consumer.commits == 1
+
+
+def test_commit_batch_survives_losing_the_partitions_mid_batch(caplog):
+    # e.g. our session timed out and the group handed our partitions to another instance: their new
+    # owner redoes the batch (duplicates, never loss), so this instance should carry on, not crash.
+    from confluent_kafka import KafkaError, KafkaException
+
+    from pipeline.clients import commit_batch
+
+    lost = KafkaException(KafkaError(KafkaError._WAIT_COORD, "Commit failed: Local: Waiting for coordinator"))
+    assert commit_batch(_Consumer(lost)) is False
+    assert "redo" in caplog.text

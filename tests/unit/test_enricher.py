@@ -132,8 +132,12 @@ class FakeConsumer:
     def consume(self, num_messages=1, timeout=1.0):
         return self.batches.pop(0) if self.batches else []
 
+    commit_error = None
+
     def commit(self, asynchronous=True):
         self.commits += 1
+        if self.commit_error is not None:
+            raise self.commit_error
 
     def close(self):
         self.closed = True
@@ -212,3 +216,17 @@ def test_main_refuses_to_start_when_the_output_schema_is_not_registered(monkeypa
     monkeypatch.setattr(enricher, "run_enricher", lambda *a, **kw: pytest.fail("started anyway"))
     with pytest.raises(SchemaNotRegistered, match="enriched_ticket.v1.avsc"):
         main([])
+
+
+def test_run_enricher_keeps_going_when_a_commit_fails_after_a_rebalance(serde_v2, enriched_serde, ticket,
+                                                                        fake_producer):
+    from confluent_kafka import KafkaError, KafkaException
+
+    consumer = FakeConsumer([RawMessage(serde_v2.encode(ticket, "tickets.valid"), 0)])
+    consumer.commit_error = KafkaException(KafkaError(KafkaError._WAIT_COORD, "Commit failed"))
+    rounds = iter([False, False, True])
+    stats = run_enricher(consumer, fake_producer, "tickets.valid", ROUTES, in_serde=serde_v2,
+                         out_serde=enriched_serde, classify=lambda t: _cls(), should_stop=lambda: next(rounds),
+                         sleep=_no_wait, model="stub")
+    assert (stats.batches, stats.commit_failures) == (0, 1)
+    assert consumer.closed

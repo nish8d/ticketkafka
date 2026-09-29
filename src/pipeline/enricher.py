@@ -13,7 +13,7 @@ from typing import Callable
 from confluent_kafka import Consumer, Producer
 
 from pipeline import config
-from pipeline.clients import producer_config, slow_consumer_config
+from pipeline.clients import commit_batch, producer_config, slow_consumer_config
 from pipeline.llm import Classification, LLMError, classify_ticket, make_client
 from pipeline.messages import Output, SourceRef, dlq_headers
 from pipeline.models import EnrichedTicket, Ticket
@@ -47,6 +47,7 @@ class EnricherStats:
     routed: int = 0
     dead_lettered: int = 0
     batches: int = 0
+    commit_failures: int = 0
 
 
 def output_topics(enriched: EnrichedTicket, routes: Routes) -> list[str]:
@@ -139,7 +140,9 @@ def run_enricher(consumer, producer, source_topic: str, routes: Routes, *,
             if remaining or delivery_errors:
                 raise RuntimeError(f"outputs not acknowledged ({remaining} pending, "
                                    f"errors: {delivery_errors}); not committing")
-            consumer.commit(asynchronous=False)
+            if not commit_batch(consumer):
+                stats.commit_failures += 1
+                continue
             stats.batches += 1
             log.info("batch done: %d messages (totals: %s)", len(messages), stats)
     except Stopping:

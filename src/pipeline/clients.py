@@ -1,5 +1,11 @@
 """Kafka client settings, in one place so every service behaves the same way."""
+import logging
+
+from confluent_kafka import KafkaException
+
 from pipeline import config
+
+log = logging.getLogger("clients")
 
 
 def producer_config() -> dict:
@@ -44,3 +50,19 @@ def slow_consumer_config(group_id: str, max_poll_interval_ms: int) -> dict:
            # evicts us and rebalances. Slow processing needs a longer window than the 5-min default.
            "max.poll.interval.ms": max_poll_interval_ms},
     )
+
+
+def commit_batch(consumer) -> bool:
+    """Commit a finished batch synchronously. False if the group took our partitions meanwhile.
+
+    That happens in any scaled group — a rebalance, or our session timing out while we were busy.
+    The batch's outputs are already acknowledged, and the partitions' new owner will redo the batch
+    from the last committed offset: duplicates, never loss. So warn and carry on rather than crash.
+    """
+    try:
+        consumer.commit(asynchronous=False)
+        return True
+    except KafkaException as exc:
+        log.warning("commit failed (%s); the partitions were likely reassigned mid-batch, "
+                    "so their new owner will redo it", exc.args[0])
+        return False

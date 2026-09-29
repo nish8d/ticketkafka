@@ -98,3 +98,55 @@ def test_main_refuses_to_start_when_the_schema_is_not_registered(monkeypatch):
     monkeypatch.setattr(validator, "run_validator", lambda *a, **kw: pytest.fail("consumed without a schema"))
     with pytest.raises(SchemaNotRegistered, match="pipeline.schemas register"):
         validator.main([])
+
+
+def test_run_validator_keeps_going_when_a_commit_fails_after_a_rebalance(serde_v2, ticket, fake_producer):
+    from confluent_kafka import KafkaError, KafkaException
+
+    from pipeline.validator import run_validator
+
+    class Msg:
+        def __init__(self, value):
+            self._value = value
+
+        def error(self):
+            return None
+
+        def value(self):
+            return self._value
+
+        def key(self):
+            return b"C-0042"
+
+        def topic(self):
+            return "tickets.raw"
+
+        def partition(self):
+            return 0
+
+        def offset(self):
+            return 0
+
+    class Consumer:
+        batches, commits, closed = None, 0, False
+
+        def subscribe(self, topics, on_assign=None, on_revoke=None):
+            pass
+
+        def consume(self, num_messages=1, timeout=1.0):
+            return self.batches.pop(0) if self.batches else []
+
+        def commit(self, asynchronous=True):
+            self.commits += 1
+            raise KafkaException(KafkaError(KafkaError._WAIT_COORD, "Commit failed"))
+
+        def close(self):
+            self.closed = True
+
+    consumer = Consumer()
+    consumer.batches = [[Msg(serde_v2.encode(ticket, "tickets.raw"))]]
+    rounds = iter([False, False, True])
+    stats = run_validator(consumer, fake_producer, "tickets.raw", "tickets.valid", "tickets.dlq", serde_v2,
+                          should_stop=lambda: next(rounds))
+    assert (stats.valid, stats.batches, stats.commit_failures) == (1, 0, 1)
+    assert consumer.closed

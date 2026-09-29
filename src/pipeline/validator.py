@@ -9,7 +9,7 @@ from typing import Callable
 from confluent_kafka import Consumer, Producer
 
 from pipeline import config
-from pipeline.clients import consumer_config, producer_config
+from pipeline.clients import commit_batch, consumer_config, producer_config
 from pipeline.messages import MAX_ERROR_LEN, Output, SourceRef, dlq_headers  # noqa: F401 (re-exported)
 from pipeline.models import Ticket
 from pipeline.serde import TicketSerde, ensure_registered, load_schema, make_registry
@@ -22,6 +22,7 @@ class ValidatorStats:
     valid: int = 0
     dead_lettered: int = 0
     batches: int = 0
+    commit_failures: int = 0
 
 
 def parse_ticket(value: bytes | None, serde: TicketSerde, topic: str) -> Ticket:
@@ -95,7 +96,9 @@ def run_validator(consumer, producer, source_topic: str, valid_topic: str, dlq_t
                                    f"errors: {delivery_errors}); not committing")
             # 2) ...then commit the input offsets. A crash between 1) and 2) means the batch is
             #    processed twice (duplicates) — never lost. That's at-least-once.
-            consumer.commit(asynchronous=False)
+            if not commit_batch(consumer):
+                stats.commit_failures += 1
+                continue
             stats.batches += 1
             log.info("batch done: %d messages (totals: %s)", len(batch), stats)
     finally:

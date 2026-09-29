@@ -31,6 +31,29 @@ services:
       retries: 10
       start_period: 15s
 
+  schema-registry:
+    image: confluentinc/cp-schema-registry:8.2.4
+    container_name: schema-registry
+    ports:
+      - "8081:8081"
+    environment:
+      SCHEMA_REGISTRY_HOST_NAME: schema-registry
+      SCHEMA_REGISTRY_LISTENERS: http://0.0.0.0:8081
+      # The registry keeps every schema in a compacted Kafka topic, `_schemas` — Kafka is its database.
+      SCHEMA_REGISTRY_KAFKASTORE_BOOTSTRAP_SERVERS: PLAINTEXT://kafka:29092
+      # Single broker, so `_schemas` can only have one replica.
+      SCHEMA_REGISTRY_KAFKASTORE_TOPIC_REPLICATION_FACTOR: 1
+      SCHEMA_REGISTRY_HEAP_OPTS: "-Xms256m -Xmx256m"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8081/subjects > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 20s
+    depends_on:
+      kafka:
+        condition: service_healthy
+
   kafka-ui:
     image: kafbat/kafka-ui:v1.5.0
     container_name: kafka-ui
@@ -39,6 +62,9 @@ services:
     environment:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
+      KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
     depends_on:
       kafka:
+        condition: service_healthy
+      schema-registry:
         condition: service_healthy

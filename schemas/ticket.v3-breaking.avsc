@@ -1,0 +1,18 @@
+{
+  "type": "record",
+  "name": "Ticket",
+  "namespace": "pipeline.tickets",
+  "doc": "DELIBERATELY BROKEN: renames body to message with no default. The registry must reject it.",
+  "fields": [
+    {"name": "ticket_id", "type": {"type": "string", "logicalType": "uuid"}},
+    {"name": "customer_id", "type": "string", "doc": "C-0001 .. C-0200; also the message key"},
+    {"name": "created_at", "type": {"type": "long", "logicalType": "timestamp-millis"},
+     "doc": "UTC; milliseconds since the epoch on the wire"},
+    {"name": "channel", "type": {"type": "enum", "name": "Channel", "symbols": ["email", "chat", "phone"]}},
+    {"name": "product", "type": "string"},
+    {"name": "subject", "type": "string"},
+    {"name": "message", "type": "string"},
+    {"name": "tier", "type": {"type": "enum", "name": "Tier", "symbols": ["free", "pro", "enterprise"]},
+     "default": "free", "doc": "Customer plan. Added in v2; readers fill in \"free\" for v1 data."}
+  ]
+}

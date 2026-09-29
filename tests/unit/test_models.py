@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from pipeline.models import CHANNELS, Ticket
+from pipeline.models import CHANNELS, TIERS, Ticket
 
 
 def test_valid_ticket_parses(ticket_dict):
@@ -52,3 +52,17 @@ def test_unknown_extra_fields_are_ignored(ticket_dict):
     ticket_dict["loyalty_tier"] = "gold"
     ticket = Ticket.model_validate(ticket_dict)
     assert "loyalty_tier" not in ticket.model_dump()
+
+
+def test_tier_defaults_to_free_for_tickets_written_before_it_existed(ticket_dict):
+    assert Ticket.model_validate(ticket_dict).tier == "free"
+
+
+@pytest.mark.parametrize("tier", TIERS)
+def test_known_tiers_are_valid(ticket_dict, tier):
+    assert Ticket.model_validate({**ticket_dict, "tier": tier}).tier == tier
+
+
+def test_unknown_tier_is_invalid(ticket_dict):
+    with pytest.raises(ValidationError):
+        Ticket.model_validate({**ticket_dict, "tier": "platinum"})

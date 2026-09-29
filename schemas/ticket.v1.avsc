@@ -1,0 +1,16 @@
+{
+  "type": "record",
+  "name": "Ticket",
+  "namespace": "pipeline.tickets",
+  "doc": "A customer support ticket. v1: the fields from stages 2-3.",
+  "fields": [
+    {"name": "ticket_id", "type": {"type": "string", "logicalType": "uuid"}},
+    {"name": "customer_id", "type": "string", "doc": "C-0001 .. C-0200; also the message key"},
+    {"name": "created_at", "type": {"type": "long", "logicalType": "timestamp-millis"},
+     "doc": "UTC; milliseconds since the epoch on the wire"},
+    {"name": "channel", "type": {"type": "enum", "name": "Channel", "symbols": ["email", "chat", "phone"]}},
+    {"name": "product", "type": "string"},
+    {"name": "subject", "type": "string"},
+    {"name": "body", "type": "string"}
+  ]
+}

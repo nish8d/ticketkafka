@@ -4,9 +4,11 @@ import uuid
 import pytest
 from confluent_kafka import Consumer, Message
 from confluent_kafka.admin import AdminClient
+from confluent_kafka.schema_registry import Schema
 
 from pipeline.admin import ensure_topics
-from pipeline.config import BOOTSTRAP_SERVERS, TopicSpec
+from pipeline.config import BOOTSTRAP_SERVERS, SCHEMA_REGISTRY_URL, TopicSpec
+from pipeline.serde import load_schema, make_registry, subject_for
 
 
 @pytest.fixture
@@ -55,3 +57,24 @@ def _read_topic(topic: str, expected: int, timeout: float = 30.0) -> list[Messag
 def read_topic():
     """Read up to `expected` messages from the start of `topic`."""
     return _read_topic
+
+
+@pytest.fixture
+def registry():
+    return make_registry(SCHEMA_REGISTRY_URL)
+
+
+@pytest.fixture
+def register_schema(registry):
+    """Register a schema file for a (test) topic's value subject; delete those subjects afterwards."""
+    subjects: set[str] = set()
+
+    def _register(topic: str, path) -> int:
+        subject = subject_for(topic)
+        subjects.add(subject)
+        return registry.register_schema(subject, Schema(load_schema(path), "AVRO"))
+
+    yield _register
+    for subject in subjects:
+        registry.delete_subject(subject)                  # soft delete...
+        registry.delete_subject(subject, permanent=True)  # ...then hard delete, so tests leave no trace

@@ -10,9 +10,10 @@ from confluent_kafka.schema_registry import Schema, SchemaRegistryClient
 from confluent_kafka.schema_registry.avro import AvroDeserializer, AvroSerializer
 from confluent_kafka.schema_registry.error import SchemaRegistryError
 from confluent_kafka.serialization import MessageField, SerializationContext
+from pydantic import BaseModel
 
 from pipeline import config
-from pipeline.models import Ticket
+from pipeline.models import EnrichedTicket, Ticket
 
 # The registry's own "no such schema/subject" codes (40400 is what the in-memory mock uses). Any other
 # 404 — a proxy, a wrong URL — says nothing about the message, so it's treated as infrastructure.
@@ -56,8 +57,10 @@ def ensure_registered(registry: SchemaRegistryClient, topic: str, schema_path: P
         ) from exc
 
 
-class TicketSerde:
-    """Encodes Tickets with one schema and decodes any registered version into that same schema."""
+class AvroSerde:
+    """Encodes models with one schema and decodes any registered writer version into that same schema."""
+
+    model: type[BaseModel] = Ticket
 
     def __init__(self, registry: SchemaRegistryClient, schema_str: str):
         self._registry = registry
@@ -70,12 +73,12 @@ class TicketSerde:
         # Passing schema_str makes it the reader schema: every writer version is resolved into it.
         self._deserializer = AvroDeserializer(registry, schema_str, conf={"subject.name.strategy.type": "TOPIC"})
 
-    def encode(self, ticket: Ticket, topic: str) -> bytes:
+    def encode(self, obj: BaseModel, topic: str) -> bytes:
         # model_dump() keeps UUID/datetime objects, which Avro's uuid/timestamp-millis types expect.
         # Fields the schema doesn't have (tier, when writing v1) are simply not written.
-        return self._serializer(ticket.model_dump(), SerializationContext(topic, MessageField.VALUE))
+        return self._serializer(obj.model_dump(), SerializationContext(topic, MessageField.VALUE))
 
-    def decode(self, value: bytes, topic: str) -> Ticket:
+    def decode(self, value: bytes, topic: str) -> BaseModel:
         """Two phases, so every failure lands in the right bucket:
 
         1. Fetch the writer schema. Only the registry's "not found" is the message's fault; anything
@@ -100,5 +103,13 @@ class TicketSerde:
             record = self._deserializer(value, SerializationContext(topic, MessageField.VALUE))
         except Exception as exc:
             raise UndecodableMessage(f"{type(exc).__name__}: {exc}") from exc
-        # Outside the try: a ValidationError here is a readable ticket that breaks our rules.
-        return Ticket.model_validate(record)
+        # Outside the try: a ValidationError here is a readable record that breaks our rules.
+        return self.model.model_validate(record)
+
+
+class TicketSerde(AvroSerde):
+    model = Ticket
+
+
+class EnrichedTicketSerde(AvroSerde):
+    model = EnrichedTicket

@@ -4,8 +4,9 @@ from confluent_kafka.schema_registry.error import SchemaRegistryError
 from pydantic import ValidationError
 
 from pipeline import config
-from pipeline.models import Ticket
+from pipeline.models import EnrichedTicket, Ticket
 from pipeline.serde import (
+    EnrichedTicketSerde,
     SchemaNotRegistered,
     TicketSerde,
     UndecodableMessage,
@@ -247,3 +248,21 @@ def test_decode_only_asks_the_registry_for_the_writer_schema(mock_registry, avro
 
     monkeypatch.setattr(mock_registry, "get_associations_by_resource_name", down)
     assert fresh.decode(value, avro_topic) == ticket
+
+
+def _enriched(ticket: Ticket) -> EnrichedTicket:
+    return EnrichedTicket.model_validate({
+        **ticket.model_dump(), "category": "technical", "priority": "urgent", "sentiment": -0.25,
+        "summary": "App crashes on login.", "enriched_at": "2026-09-29T12:00:05+00:00", "model": "stub"})
+
+
+def test_enriched_round_trip(enriched_serde, ticket):
+    enriched = _enriched(ticket)
+    value = enriched_serde.encode(enriched, "tickets.tech")
+    assert enriched_serde.decode(value, "tickets.tech") == enriched
+
+
+def test_enriched_serde_rejects_a_plain_ticket_message(enriched_serde, serde_v2, ticket):
+    # A Ticket record is not an EnrichedTicket (different name, missing fields): bad data, DLQ-able.
+    with pytest.raises(UndecodableMessage):
+        enriched_serde.decode(serde_v2.encode(ticket, "tickets.raw"), "tickets.tech")

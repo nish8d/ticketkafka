@@ -10,31 +10,12 @@ from confluent_kafka import Consumer, Producer
 
 from pipeline import config
 from pipeline.clients import consumer_config, producer_config
+from pipeline.messages import MAX_ERROR_LEN, Output, SourceRef, dlq_headers  # noqa: F401 (re-exported)
 from pipeline.models import Ticket
 from pipeline.serde import TicketSerde, ensure_registered, load_schema, make_registry
 from pipeline.shutdown import install_stop_handler
 
 log = logging.getLogger("validator")
-
-MAX_ERROR_LEN = 1000
-
-
-@dataclass(frozen=True)
-class SourceRef:
-    """Where an input message came from — recorded on DLQ messages for debugging and replay."""
-
-    topic: str
-    partition: int
-    offset: int
-
-
-@dataclass(frozen=True)
-class Output:
-    topic: str
-    key: bytes | None
-    value: bytes | None
-    headers: list[tuple[str, bytes]]
-
 
 @dataclass
 class ValidatorStats:
@@ -49,17 +30,6 @@ def parse_ticket(value: bytes | None, serde: TicketSerde, topic: str) -> Ticket:
     # Raises UndecodableMessage (not Avro / unknown schema) or pydantic.ValidationError (breaks our
     # rules) — both ValueErrors. A registry outage raises something else and is NOT caught in route().
     return serde.decode(value, topic)
-
-
-def dlq_headers(exc: Exception, source: SourceRef, now: datetime) -> list[tuple[str, bytes]]:
-    return [
-        ("error.type", type(exc).__name__.encode()),
-        ("error.message", str(exc)[:MAX_ERROR_LEN].encode()),
-        ("source.topic", source.topic.encode()),
-        ("source.partition", str(source.partition).encode()),
-        ("source.offset", str(source.offset).encode()),
-        ("failed_at", now.isoformat().encode()),
-    ]
 
 
 def route(value: bytes | None, key: bytes | None, source: SourceRef, now: datetime,

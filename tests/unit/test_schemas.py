@@ -8,6 +8,7 @@ from pipeline.schemas import (
     list_subjects,
     main,
     register,
+    topics_for_schema,
 )
 from pipeline.serde import load_schema, make_registry
 
@@ -85,3 +86,13 @@ def test_check_treats_an_empty_subject_as_compatible():
 def test_cli_requires_a_subcommand():
     with pytest.raises(SystemExit):
         main([])
+
+
+def test_default_topics_follow_the_schemas_record_name():
+    assert topics_for_schema(load_schema(config.TICKET_SCHEMA_V2)) == ("tickets.raw", "tickets.valid")
+    assert topics_for_schema(load_schema(config.ENRICHED_SCHEMA_V1)) == config.ENRICHED_TOPICS
+
+
+def test_unknown_record_name_asks_for_explicit_topics():
+    with pytest.raises(ValueError, match="--topic"):
+        topics_for_schema('{"type": "record", "name": "Customer", "fields": []}')

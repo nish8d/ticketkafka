@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from pipeline.models import CHANNELS, TIERS, Ticket
+from pipeline.models import CATEGORIES, CHANNELS, PRIORITIES, TIERS, EnrichedTicket, Ticket
 
 
 def test_valid_ticket_parses(ticket_dict):
@@ -66,3 +66,29 @@ def test_known_tiers_are_valid(ticket_dict, tier):
 def test_unknown_tier_is_invalid(ticket_dict):
     with pytest.raises(ValidationError):
         Ticket.model_validate({**ticket_dict, "tier": "platinum"})
+
+
+def _enriched(ticket_dict, **overrides) -> dict:
+    return {**ticket_dict, "category": "billing", "priority": "high", "sentiment": -0.6,
+            "summary": "Customer was charged twice.", "enriched_at": "2026-09-29T12:00:05+00:00",
+            "model": "qwen3.5:4b", **overrides}
+
+
+def test_enriched_ticket_is_a_ticket_plus_classification(ticket_dict):
+    enriched = EnrichedTicket.model_validate(_enriched(ticket_dict))
+    assert isinstance(enriched, Ticket)
+    assert (enriched.category, enriched.priority, enriched.sentiment) == ("billing", "high", -0.6)
+
+
+def test_category_and_priority_values():
+    assert CATEGORIES == ("billing", "technical", "account", "other")
+    assert PRIORITIES == ("low", "medium", "high", "urgent")
+
+
+@pytest.mark.parametrize("overrides", [
+    {"category": "sales"}, {"priority": "critical"}, {"sentiment": 1.5}, {"sentiment": -1.01},
+    {"summary": "  "}, {"enriched_at": "2026-09-29T12:00:05"},
+])
+def test_invalid_enrichment_is_rejected(ticket_dict, overrides):
+    with pytest.raises(ValidationError):
+        EnrichedTicket.model_validate(_enriched(ticket_dict, **overrides))

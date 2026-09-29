@@ -11,6 +11,12 @@ CHANNELS: tuple[str, ...] = get_args(Channel)
 Tier = Literal["free", "pro", "enterprise"]
 TIERS: tuple[str, ...] = get_args(Tier)
 
+# Written by the enricher (stage 5).
+Category = Literal["billing", "technical", "account", "other"]
+CATEGORIES: tuple[str, ...] = get_args(Category)
+Priority = Literal["low", "medium", "high", "urgent"]
+PRIORITIES: tuple[str, ...] = get_args(Priority)
+
 PRODUCTS: tuple[str, ...] = (
     "SmartHome Hub",
     "CloudDrive Pro",
@@ -34,3 +40,14 @@ class Ticket(BaseModel):
     body: str = Field(min_length=1)
     # The default mirrors the Avro default in ticket.v2.avsc: tickets written before v2 are "free".
     tier: Tier = "free"
+
+
+class EnrichedTicket(Ticket):
+    """A ticket plus what the LLM made of it. Produced to the routed topics by the enricher."""
+
+    category: Category
+    priority: Priority
+    sentiment: float = Field(ge=-1.0, le=1.0)
+    summary: str = Field(min_length=1, max_length=300)
+    enriched_at: AwareDatetime
+    model: str = Field(min_length=1)

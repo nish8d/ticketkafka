@@ -1,0 +1,25 @@
+{
+  "type": "record",
+  "name": "EnrichedTicket",
+  "namespace": "pipeline.tickets",
+  "doc": "A ticket plus the LLM's classification. v1. Produced by the enricher to the routed topics.",
+  "fields": [
+    {"name": "ticket_id", "type": {"type": "string", "logicalType": "uuid"}},
+    {"name": "customer_id", "type": "string", "doc": "C-0001 .. C-0200; also the message key"},
+    {"name": "created_at", "type": {"type": "long", "logicalType": "timestamp-millis"},
+     "doc": "UTC; milliseconds since the epoch on the wire"},
+    {"name": "channel", "type": {"type": "enum", "name": "Channel", "symbols": ["email", "chat", "phone"]}},
+    {"name": "product", "type": "string"},
+    {"name": "subject", "type": "string"},
+    {"name": "body", "type": "string"},
+    {"name": "tier", "type": {"type": "enum", "name": "Tier", "symbols": ["free", "pro", "enterprise"]},
+     "default": "free", "doc": "Customer plan. Added in v2; readers fill in \"free\" for v1 data."},
+    {"name": "category", "type": {"type": "enum", "name": "Category",
+     "symbols": ["billing", "technical", "account", "other"]}},
+    {"name": "priority", "type": {"type": "enum", "name": "Priority", "symbols": ["low", "medium", "high", "urgent"]}},
+    {"name": "sentiment", "type": "double", "doc": "-1.0 (furious) .. 1.0 (delighted)"},
+    {"name": "summary", "type": "string", "doc": "One sentence, written by the LLM"},
+    {"name": "enriched_at", "type": {"type": "long", "logicalType": "timestamp-millis"}},
+    {"name": "model", "type": "string", "doc": "The Ollama model that classified this ticket"}
+  ]
+}

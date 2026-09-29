@@ -5,6 +5,7 @@
   uv run python -m pipeline.schemas list
 """
 import argparse
+import json
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,12 @@ TICKET_TOPICS: tuple[str, ...] = (config.TOPIC_RAW, config.TOPIC_VALID)
 # BACKWARD: a new schema must be able to read data written with the previous one.
 # So consumers upgrade first, producers second.
 COMPATIBILITY = "BACKWARD"
+
+# Which topics a schema belongs to, by its Avro record name — so `register FILE` needs no --topic.
+TOPICS_BY_RECORD: dict[str, tuple[str, ...]] = {
+    "pipeline.tickets.Ticket": TICKET_TOPICS,
+    "pipeline.tickets.EnrichedTicket": config.ENRICHED_TOPICS,
+}
 
 
 class IncompatibleSchema(RuntimeError):
@@ -76,6 +83,15 @@ def check(url: str, topics, schema_str: str, http=httpx) -> list[Compatibility]:
     return results
 
 
+def topics_for_schema(schema_str: str) -> tuple[str, ...]:
+    schema = json.loads(schema_str)
+    full_name = f"{schema['namespace']}.{schema['name']}" if "namespace" in schema else schema["name"]
+    try:
+        return TOPICS_BY_RECORD[full_name]
+    except KeyError:
+        raise ValueError(f"no default topics for record {full_name!r}; pass --topic explicitly") from None
+
+
 def list_subjects(registry) -> dict[str, list[int]]:
     return {subject: sorted(registry.get_versions(subject)) for subject in sorted(registry.get_subjects())}
 
@@ -83,13 +99,12 @@ def list_subjects(registry) -> dict[str, list[int]]:
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Register, check and list ticket schemas.")
     parser.add_argument("--topic", action="append", dest="topics",
-                        help=f"topic whose value subject to use (repeatable; default: {', '.join(TICKET_TOPICS)})")
+                        help="topic whose value subject to use (repeatable; default: chosen from the schema's record name)")
     sub = parser.add_subparsers(dest="command", required=True)
     sub.add_parser("register", help="register a schema file (rejected if incompatible)").add_argument("path", type=Path)
     sub.add_parser("check", help="test a schema file against the latest version").add_argument("path", type=Path)
     sub.add_parser("list", help="list subjects and their versions")
     args = parser.parse_args(argv)
-    topics = args.topics or TICKET_TOPICS
     registry = make_registry(config.SCHEMA_REGISTRY_URL)
 
     if args.command == "list":
@@ -97,6 +112,7 @@ def main(argv: list[str] | None = None) -> int:
             print(f"{subject}: versions {versions}")
         return 0
     schema_str = load_schema(args.path)
+    topics = args.topics or topics_for_schema(schema_str)
     if args.command == "check":
         results = check(config.SCHEMA_REGISTRY_URL, topics, schema_str)
         for r in results:

@@ -4,7 +4,7 @@ import fastavro
 import pytest
 
 from pipeline import config
-from pipeline.models import CHANNELS, TIERS, Ticket
+from pipeline.models import CATEGORIES, CHANNELS, PRIORITIES, TIERS, EnrichedTicket, Ticket
 
 
 def _load(path) -> dict:
@@ -15,12 +15,14 @@ def _fields(schema: dict) -> dict[str, dict]:
     return {f["name"]: f for f in schema["fields"]}
 
 
-def test_all_three_schema_files_exist():
-    assert {p.name for p in config.SCHEMA_DIR.glob("*.avsc")} == {
-        "ticket.v1.avsc", "ticket.v2.avsc", "ticket.v3-breaking.avsc"}
+SCHEMA_FILES = ["ticket.v1.avsc", "ticket.v2.avsc", "ticket.v3-breaking.avsc", "enriched_ticket.v1.avsc"]
 
 
-@pytest.mark.parametrize("name", ["ticket.v1.avsc", "ticket.v2.avsc", "ticket.v3-breaking.avsc"])
+def test_all_schema_files_exist():
+    assert {p.name for p in config.SCHEMA_DIR.glob("*.avsc")} == set(SCHEMA_FILES)
+
+
+@pytest.mark.parametrize("name", SCHEMA_FILES)
 def test_every_schema_file_is_valid_avro(name):
     fastavro.parse_schema(_load(config.SCHEMA_DIR / name))
 
@@ -47,3 +49,16 @@ def test_breaking_schema_renames_body_without_a_default():
     fields = _fields(_load(config.SCHEMA_DIR / "ticket.v3-breaking.avsc"))
     assert "body" not in fields
     assert "message" in fields and "default" not in fields["message"]
+
+
+def test_enriched_schema_matches_the_model():
+    fields = _fields(_load(config.ENRICHED_SCHEMA_V1))
+    assert set(fields) == set(EnrichedTicket.model_fields)
+    assert tuple(fields["category"]["type"]["symbols"]) == CATEGORIES
+    assert tuple(fields["priority"]["type"]["symbols"]) == PRIORITIES
+
+
+def test_enriched_schema_reuses_the_ticket_v2_fields():
+    ticket_fields = _fields(_load(config.TICKET_SCHEMA_V2))
+    enriched_fields = _fields(_load(config.ENRICHED_SCHEMA_V1))
+    assert {k: enriched_fields[k] for k in ticket_fields} == ticket_fields

@@ -144,3 +144,106 @@ def test_clis_print_no_third_party_warnings():
     result = subprocess.run([sys.executable, "-m", "pipeline.schemas", "--help"], capture_output=True, text=True)
     assert result.returncode == 0
     assert result.stderr == ""
+
+
+# --- Bad data that decodes far enough to trip over itself must still be DLQ-able, not crash. ---
+
+def _frame(schema_id: int, record: dict, schema: dict) -> bytes:
+    """Confluent framing around a record written with an arbitrary schema (bypassing our serde)."""
+    import io
+
+    import fastavro
+
+    out = io.BytesIO()
+    fastavro.schemaless_writer(out, fastavro.parse_schema(schema), record)
+    return b"\x00" + schema_id.to_bytes(4, "big") + out.getvalue()
+
+
+def _v2_dict() -> dict:
+    import json
+
+    return json.loads(load_schema(config.TICKET_SCHEMA_V2))
+
+
+def test_out_of_range_timestamp_is_undecodable(mock_registry, serde_v2, avro_topic, ticket):
+    # A producer bug writes microseconds into a timestamp-millis field: fastavro raises OverflowError.
+    v2_id = ensure_registered(mock_registry, avro_topic, config.TICKET_SCHEMA_V2)
+    plain = _v2_dict()
+    for field in plain["fields"]:
+        if field["name"] == "created_at":
+            field["type"] = "long"
+    record = {**ticket.model_dump(mode="json"), "created_at": 1_790_000_000_000_000_000}
+    with pytest.raises(UndecodableMessage):
+        serde_v2.decode(_frame(v2_id, record, plain), avro_topic)
+
+
+def test_schema_id_of_a_different_record_is_undecodable(mock_registry, serde_v2, avro_topic):
+    from confluent_kafka.schema_registry import Schema
+
+    customer = {"type": "record", "name": "Customer", "fields": [{"name": "id", "type": "int"}]}
+    import json
+
+    customer_id = mock_registry.register_schema("customers.latest-value", Schema(json.dumps(customer), "AVRO"))
+    with pytest.raises(UndecodableMessage):
+        serde_v2.decode(_frame(customer_id, {"id": 7}, customer), avro_topic)
+
+
+def test_enum_symbol_the_reader_does_not_know_is_undecodable(mock_registry, serde_v2, avro_topic, ticket):
+    # BACKWARD accepts adding an enum symbol; a v2 reader then meets a symbol it has never heard of.
+    from confluent_kafka.schema_registry import Schema
+    import json
+
+    newer = _v2_dict()
+    for field in newer["fields"]:
+        if field["name"] == "tier":
+            field["type"]["symbols"].append("trial")
+    newer_id = mock_registry.register_schema(subject_for(avro_topic), Schema(json.dumps(newer), "AVRO"))
+    record = {**ticket.model_dump(), "tier": "trial"}
+    with pytest.raises(UndecodableMessage):
+        serde_v2.decode(_frame(newer_id, record, newer), avro_topic)
+
+
+def test_guid_framing_is_undecodable_with_a_clear_reason(serde_v2, avro_topic, ticket):
+    value = b"\x01" + b"\x12" * 16 + serde_v2.encode(ticket, avro_topic)[5:]
+    with pytest.raises(UndecodableMessage, match="magic byte 1"):
+        serde_v2.decode(value, avro_topic)
+
+
+@pytest.mark.parametrize("error", [
+    SchemaRegistryError(404, -1, "404 page not found"),   # a proxy or wrong URL, not the registry
+    ValueError("Expecting value: line 1 column 1"),       # a 2xx with a non-JSON body
+])
+def test_registry_answers_that_are_not_about_the_message_propagate(mock_registry, avro_topic, ticket,
+                                                                    monkeypatch, error):
+    value = TicketSerde(mock_registry, load_schema(config.TICKET_SCHEMA_V2)).encode(ticket, avro_topic)
+    fresh = TicketSerde(mock_registry, load_schema(config.TICKET_SCHEMA_V2))
+
+    def broken(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(mock_registry, "get_schema", broken)
+    with pytest.raises(type(error)) as excinfo:
+        fresh.decode(value, avro_topic)
+    assert not isinstance(excinfo.value, UndecodableMessage)  # infra trouble must not be dead-lettered
+
+
+def test_ensure_registered_propagates_a_404_that_is_not_from_the_registry(mock_registry, avro_topic, monkeypatch):
+    def not_the_registry(*args, **kwargs):
+        raise SchemaRegistryError(404, -1, "404 page not found")
+
+    monkeypatch.setattr(mock_registry, "lookup_schema", not_the_registry)
+    with pytest.raises(SchemaRegistryError):
+        ensure_registered(mock_registry, avro_topic, config.TICKET_SCHEMA_V2)
+
+
+def test_decode_only_asks_the_registry_for_the_writer_schema(mock_registry, avro_topic, ticket, monkeypatch):
+    # The client's default ("associated") subject strategy makes its own registry call while decoding —
+    # inside the phase where every error counts as bad bytes. We pin the plain topic strategy instead.
+    value = TicketSerde(mock_registry, load_schema(config.TICKET_SCHEMA_V2)).encode(ticket, avro_topic)
+    fresh = TicketSerde(mock_registry, load_schema(config.TICKET_SCHEMA_V2))
+
+    def down(*args, **kwargs):
+        raise httpx.ConnectError("connection refused")
+
+    monkeypatch.setattr(mock_registry, "get_associations_by_resource_name", down)
+    assert fresh.decode(value, avro_topic) == ticket

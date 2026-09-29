@@ -9,13 +9,14 @@ from pathlib import Path
 from confluent_kafka.schema_registry import Schema, SchemaRegistryClient
 from confluent_kafka.schema_registry.avro import AvroDeserializer, AvroSerializer
 from confluent_kafka.schema_registry.error import SchemaRegistryError
-from confluent_kafka.serialization import MessageField, SerializationContext, SerializationError
+from confluent_kafka.serialization import MessageField, SerializationContext
 
 from pipeline import config
 from pipeline.models import Ticket
 
-# What fastavro raises on corrupt Avro bytes, beyond the client's own SerializationError.
-_CORRUPT_AVRO = (SerializationError, EOFError, ValueError, IndexError)
+# The registry's own "no such schema/subject" codes (40400 is what the in-memory mock uses). Any other
+# 404 — a proxy, a wrong URL — says nothing about the message, so it's treated as infrastructure.
+_NOT_FOUND_CODES = {40400, 40401, 40403}
 
 
 class UndecodableMessage(ValueError):
@@ -47,7 +48,7 @@ def ensure_registered(registry: SchemaRegistryClient, topic: str, schema_path: P
     try:
         return registry.lookup_schema(subject, Schema(load_schema(schema_path), "AVRO")).schema_id
     except SchemaRegistryError as exc:
-        if exc.http_status_code != 404:
+        if exc.error_code not in _NOT_FOUND_CODES:
             raise
         raise SchemaNotRegistered(
             f"{schema_path} is not registered under subject {subject!r}. Register it first:\n"
@@ -59,11 +60,15 @@ class TicketSerde:
     """Encodes Tickets with one schema and decodes any registered version into that same schema."""
 
     def __init__(self, registry: SchemaRegistryClient, schema_str: str):
+        self._registry = registry
         # auto.register.schemas=False: producers may only use schemas someone registered on purpose,
         # so the registry's compatibility check can't be bypassed by just deploying new code.
-        self._serializer = AvroSerializer(registry, schema_str, conf={"auto.register.schemas": False})
+        # TOPIC = subject_for(): "<topic>-value". Set explicitly because the client's default strategy
+        # asks the registry for the subject, and decode() relies on phase 2 making no network calls.
+        self._serializer = AvroSerializer(registry, schema_str, conf={
+            "auto.register.schemas": False, "subject.name.strategy.type": "TOPIC"})
         # Passing schema_str makes it the reader schema: every writer version is resolved into it.
-        self._deserializer = AvroDeserializer(registry, schema_str)
+        self._deserializer = AvroDeserializer(registry, schema_str, conf={"subject.name.strategy.type": "TOPIC"})
 
     def encode(self, ticket: Ticket, topic: str) -> bytes:
         # model_dump() keeps UUID/datetime objects, which Avro's uuid/timestamp-millis types expect.
@@ -71,14 +76,29 @@ class TicketSerde:
         return self._serializer(ticket.model_dump(), SerializationContext(topic, MessageField.VALUE))
 
     def decode(self, value: bytes, topic: str) -> Ticket:
+        """Two phases, so every failure lands in the right bucket:
+
+        1. Fetch the writer schema. Only the registry's "not found" is the message's fault; anything
+           else (unreachable, 5xx, garbage answers) propagates, so the validator crashes uncommitted.
+        2. Decode. The writer schema is now cached, so no network is involved: any error at all is
+           bad bytes — out-of-range values, a foreign record's id, an enum symbol we don't know yet.
+        """
+        if len(value) <= 5:
+            raise UndecodableMessage(f"{len(value)} bytes is too short for Schema Registry framing")
+        if value[0] != 0:
+            # Our producers write magic byte 0 (+ 4-byte id). JSON starts with "{", i.e. magic byte 123.
+            raise UndecodableMessage(f"unsupported framing: magic byte {value[0]} (expected 0)")
+        schema_id = int.from_bytes(value[1:5], "big")
+        try:
+            # Same subject the deserializer uses, so this fills the exact cache entry it will read.
+            self._registry.get_schema(schema_id, subject_for(topic))
+        except SchemaRegistryError as exc:
+            if exc.error_code in _NOT_FOUND_CODES:
+                raise UndecodableMessage(f"unknown schema id {schema_id}: {exc}") from exc
+            raise
         try:
             record = self._deserializer(value, SerializationContext(topic, MessageField.VALUE))
-        except SchemaRegistryError as exc:
-            if exc.http_status_code == 404:
-                schema_id = int.from_bytes(value[1:5], "big")
-                raise UndecodableMessage(f"unknown schema id {schema_id}: {exc}") from exc
-            raise  # the registry is broken, not the message: crash, don't dead-letter
-        except _CORRUPT_AVRO as exc:
+        except Exception as exc:
             raise UndecodableMessage(f"{type(exc).__name__}: {exc}") from exc
         # Outside the try: a ValidationError here is a readable ticket that breaks our rules.
         return Ticket.model_validate(record)

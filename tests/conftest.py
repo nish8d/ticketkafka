@@ -1,4 +1,16 @@
+import warnings
+
 import pytest
+import authlib.deprecate
+
+# authlib (pulled in by the Schema Registry client) warns about its own httpx integration on import,
+# and forces its warnings to "always" when imported — so our filter has to be added after that.
+warnings.filterwarnings("ignore", message="The httpx module is deprecated", category=DeprecationWarning)
+
+from confluent_kafka.schema_registry import Schema  # noqa: E402
+
+from pipeline import config  # noqa: E402
+from pipeline.serde import TicketSerde, load_schema, make_registry, subject_for  # noqa: E402
 
 
 @pytest.fixture
@@ -65,3 +77,29 @@ class FakeProducer:
 @pytest.fixture
 def fake_producer() -> FakeProducer:
     return FakeProducer()
+
+
+
+@pytest.fixture
+def mock_registry():
+    """An in-memory registry (no network) with v1 and v2 registered for tickets.raw and tickets.valid."""
+    registry = make_registry("mock://unit-tests")
+    for topic in (config.TOPIC_RAW, config.TOPIC_VALID):
+        for path in (config.TICKET_SCHEMA_V1, config.TICKET_SCHEMA_V2):
+            registry.register_schema(subject_for(topic), Schema(load_schema(path), "AVRO"))
+    return registry
+
+
+@pytest.fixture
+def serde_v1(mock_registry) -> TicketSerde:
+    return TicketSerde(mock_registry, load_schema(config.TICKET_SCHEMA_V1))
+
+
+@pytest.fixture
+def serde_v2(mock_registry) -> TicketSerde:
+    return TicketSerde(mock_registry, load_schema(config.TICKET_SCHEMA_V2))
+
+
+@pytest.fixture
+def avro_topic() -> str:
+    return config.TOPIC_RAW

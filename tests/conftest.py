@@ -1,16 +1,9 @@
-import warnings
-
+import pipeline  # noqa: F401  # isort: skip — first, so its warning filter is in place before the registry client loads
 import pytest
-import authlib.deprecate
+from confluent_kafka.schema_registry import Schema
 
-# authlib (pulled in by the Schema Registry client) warns about its own httpx integration on import,
-# and forces its warnings to "always" when imported — so our filter has to be added after that.
-warnings.filterwarnings("ignore", message="The httpx module is deprecated", category=DeprecationWarning)
-
-from confluent_kafka.schema_registry import Schema  # noqa: E402
-
-from pipeline import config  # noqa: E402
-from pipeline.serde import TicketSerde, load_schema, make_registry, subject_for  # noqa: E402
+from pipeline import config
+from pipeline.serde import TicketSerde, load_schema, make_registry, subject_for
 
 
 @pytest.fixture

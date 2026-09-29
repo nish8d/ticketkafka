@@ -134,3 +134,13 @@ def test_ensure_registered_explains_how_to_fix_a_missing_schema(avro_topic):
     message = str(excinfo.value)
     assert "tickets.raw-value" in message
     assert f"uv run python -m pipeline.schemas register {config.TICKET_SCHEMA_V2}" in message
+
+
+def test_clis_print_no_third_party_warnings():
+    # authlib (a Schema Registry client dependency) warns on import; the CLIs shouldn't show that.
+    import subprocess
+    import sys
+
+    result = subprocess.run([sys.executable, "-m", "pipeline.schemas", "--help"], capture_output=True, text=True)
+    assert result.returncode == 0
+    assert result.stderr == ""

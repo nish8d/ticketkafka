@@ -4,7 +4,8 @@ import threading
 from typing import Callable
 
 
-def install_stop_handler() -> Callable[[], bool]:
+def install_stop_event() -> threading.Event:
+    """Set on the first Ctrl-C / SIGTERM. Wait on it to sleep in a way shutdown can interrupt."""
     stop = threading.Event()
 
     def _handler(signum, frame):
@@ -12,4 +13,8 @@ def install_stop_handler() -> Callable[[], bool]:
 
     signal.signal(signal.SIGINT, _handler)
     signal.signal(signal.SIGTERM, _handler)
-    return stop.is_set
+    return stop
+
+
+def install_stop_handler() -> Callable[[], bool]:
+    return install_stop_event().is_set

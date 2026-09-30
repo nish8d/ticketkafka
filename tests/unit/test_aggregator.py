@@ -1,17 +1,23 @@
 import logging
+import subprocess
+import sys
 from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
 from pydantic import ValidationError
 
+from pipeline import config
 from pipeline.aggregator import (
+    MissingTopics,
+    Topics,
     event_time_ms,
     has_value,
     is_newer,
     log_late,
     make_consumer_error_handler,
     stats_key,
+    require_topics,
     stats_row,
 )
 from pipeline.models import EnrichedTicket
@@ -155,3 +161,38 @@ def test_unacknowledged_dlq_write_is_not_skipped(fake_producer, raw, failure):
     else:
         fake_producer.delivery_error = "broker said no"
     assert _handler(fake_producer)(UndecodableMessage("x"), raw, logging.getLogger("t")) is False
+
+
+class FakeAdmin:
+    def __init__(self, existing):
+        self._existing = existing
+
+    def list_topics(self, timeout=None):
+        return type("Metadata", (), {"topics": {name: None for name in self._existing}})()
+
+
+def test_default_topics_are_the_production_ones():
+    topics = Topics()
+    assert topics.inputs == config.AGGREGATOR_INPUTS
+    assert (topics.stats, topics.latest, topics.dlq) == ("tickets.stats", "customers.latest", "tickets.dlq")
+    assert topics.ours() == [*config.AGGREGATOR_INPUTS, "tickets.stats", "customers.latest", "tickets.dlq"]
+
+
+def test_require_topics_passes_when_all_exist():
+    require_topics(FakeAdmin(Topics().ours() + ["other"]), Topics().ours())
+
+
+def test_require_topics_names_the_missing_ones_and_the_fix():
+    # Quix would otherwise create them itself, without our settings: customers.latest uncompacted.
+    with pytest.raises(MissingTopics) as info:
+        require_topics(FakeAdmin(["tickets.billing"]), ["tickets.billing", "customers.latest", "tickets.stats"])
+    assert "customers.latest" in str(info.value) and "tickets.stats" in str(info.value)
+    assert "pipeline.admin" in str(info.value)
+
+
+def test_cli_help_prints_no_third_party_warnings():
+    # Importing quixstreams pulls in authlib, which warns on import; pipeline/__init__ filters it.
+    result = subprocess.run([sys.executable, "-m", "pipeline.aggregator", "--help"], capture_output=True, text=True)
+    assert result.returncode == 0
+    assert "--window-seconds" in result.stdout
+    assert result.stderr == ""

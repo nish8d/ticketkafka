@@ -8,7 +8,7 @@ from confluent_kafka import Producer
 from pipeline import config
 from pipeline.aggregator import Topics, build_app
 from pipeline.clients import producer_config
-from pipeline.models import EnrichedTicket
+from pipeline.models import CATEGORIES, PRIORITIES, EnrichedTicket
 from pipeline.serde import EnrichedTicketSerde, TicketStatsSerde, load_schema
 
 pytestmark = pytest.mark.integration
@@ -29,17 +29,22 @@ def group(admin):
             future.result()
 
 
-@pytest.fixture
-def topics(make_topic, register_schema) -> Topics:
-    # One partition per input, so the repartition topics get one partition too, and any later ticket
-    # moves event time forward for every key. With several partitions each one closes its own
-    # windows, and only when a newer ticket reaches it (see the stage notes).
-    topics = Topics(inputs=(make_topic("billing"), make_topic("tech"), make_topic("other")),
+def _make_topics(make_topic, register_schema, partitions: int) -> Topics:
+    topics = Topics(inputs=(make_topic("billing", partitions), make_topic("tech", partitions),
+                            make_topic("other", partitions)),
                     stats=make_topic("stats"), latest=make_topic("latest"), dlq=make_topic("dlq"))
     for name in (*topics.inputs, topics.latest):
         register_schema(name, config.ENRICHED_SCHEMA_V1)
     register_schema(topics.stats, config.STATS_SCHEMA_V1)
     return topics
+
+
+@pytest.fixture
+def topics(make_topic, register_schema) -> Topics:
+    # One partition per input, so the repartition topics get one partition too, and any later ticket
+    # moves event time forward for every key. With several partitions each one closes its own
+    # windows, and only when a newer ticket reaches it (see the stage notes).
+    return _make_topics(make_topic, register_schema, partitions=1)
 
 
 @pytest.fixture
@@ -150,3 +155,68 @@ def test_window_state_is_restored_from_the_changelog(topics, registry, group, se
         ("category", "billing", T0, 2), ("category", "technical", T0, 1),
         ("priority", "low", T0, 1), ("priority", "urgent", T0, 1), ("priority", "high", T0, 1),
     }
+
+
+def test_a_tombstone_on_an_input_is_skipped_not_fatal(topics, registry, group, send, read_topic, tmp_path):
+    producer = Producer(producer_config())
+    producer.produce(topics.inputs[BILLING], key=b"C-0001", value=None)
+    assert producer.flush(10) == 0
+    send(BILLING, "C-0002", "billing", "low", 1, subject="fine")
+
+    _run(topics, registry, group, tmp_path / "state")
+
+    serde = EnrichedTicketSerde(registry, load_schema(config.ENRICHED_SCHEMA_V1))
+    [latest] = read_topic(topics.latest, 1)
+    assert serde.decode(latest.value(), topics.latest).subject == "fine"
+    assert read_topic(topics.dlq, 1, timeout=5) == []
+
+
+def test_three_partition_inputs_go_through_real_repartition_topics(make_topic, register_schema, admin, registry,
+                                                                   group, ticket_dict, read_topic, tmp_path):
+    topics = _make_topics(make_topic, register_schema, partitions=3)
+    serde = EnrichedTicketSerde(registry, load_schema(config.ENRICHED_SCHEMA_V1))
+    producer = Producer(producer_config())
+
+    def send(index, customer, category, priority, seconds):
+        at = T0 + timedelta(seconds=seconds)
+        ticket = EnrichedTicket.model_validate({
+            **ticket_dict, "ticket_id": str(uuid.uuid4()), "customer_id": customer, "created_at": at,
+            "category": category, "priority": priority, "sentiment": 0.0, "summary": "s",
+            "enriched_at": at, "model": "stub"})
+        producer.produce(topics.inputs[index], key=customer.encode(), value=serde.encode(ticket, topics.inputs[index]))
+
+    send(BILLING, "C-0001", "billing", "low", 1)
+    send(BILLING, "C-0002", "billing", "high", 2)
+    send(BILLING, "C-0003", "billing", "low", 3)
+    send(TECH, "C-0004", "technical", "urgent", 4)
+    send(TECH, "C-0005", "technical", "urgent", 5)
+    send(OTHER, "C-0006", "account", "medium", 6)
+    send(OTHER, "C-0007", "other", "urgent", 7)
+    assert producer.flush(10) == 0
+    state_dir = tmp_path / "state"
+    # Run 1 sees only window 1. Sending the closing tickets in the same batch would race: the three input
+    # partitions are read in no fixed order, so a closing ticket could overtake a window-1 ticket and make
+    # it "late". (Between partitions Kafka guarantees no order; grace is what absorbs this in real use.)
+    _run(topics, registry, group, state_dir)
+    # Closing tickets, one per category and per priority: whichever repartition partition a value hashes
+    # to, some closing ticket reaches it with a newer event time, so every window 1 closes. The window at
+    # +120 s stays open, so it produces no rows.
+    for i, category in enumerate(CATEGORIES):
+        send(OTHER, f"C-1{i:03d}", category, PRIORITIES[0], 130)
+    for i, priority in enumerate(PRIORITIES):
+        send(OTHER, f"C-2{i:03d}", CATEGORIES[0], priority, 130)
+    assert producer.flush(10) == 0
+    _run(topics, registry, group, state_dir)
+
+    window_1 = {
+        ("category", "billing", T0, 3), ("category", "technical", T0, 2),
+        ("category", "account", T0, 1), ("category", "other", T0, 1),
+        ("priority", "low", T0, 2), ("priority", "high", T0, 1),
+        ("priority", "urgent", T0, 3), ("priority", "medium", T0, 1),
+    }
+    rows, n = _stats(read_topic, topics, registry, expected=len(window_1))
+    assert rows == window_1 and n == len(window_1)
+
+    names = admin.list_topics(timeout=10).topics
+    repartitions = {t: len(m.partitions) for t, m in names.items() if "repartition__" in t and group in t}
+    assert len(repartitions) == 2 and set(repartitions.values()) == {3}, repartitions

@@ -41,6 +41,10 @@ def test_event_time_ignores_the_kafka_timestamp_and_the_utc_offset():
     assert event_time_ms(value, None, 999, None) == T0_MS
 
 
+def test_event_time_of_a_tombstone_falls_back_to_the_kafka_timestamp():
+    assert event_time_ms(None, None, 1234, None) == 1234
+
+
 def test_stats_row_turns_a_closed_window_into_a_ticket_stats_record():
     window = {"start": T0_MS, "end": T0_MS + 300_000, "value": 4}
     assert stats_row("category", window, "billing") == {

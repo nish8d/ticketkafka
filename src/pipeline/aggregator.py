@@ -50,9 +50,11 @@ def _dt(ms: int) -> datetime:
     return _EPOCH + ms * _MS
 
 
-def event_time_ms(value: dict, headers, timestamp: int, timestamp_type) -> int:
+def event_time_ms(value: dict | None, headers, timestamp: int, timestamp_type) -> int:
     """Quix timestamp extractor: window by when the customer opened the ticket (event time), not by
     when the enricher got round to it (the Kafka timestamp, which a slow LLM pushes later)."""
+    if value is None:
+        return timestamp  # a tombstone has no created_at; Quix calls us anyway, and has_value drops it next
     return _ms(datetime.fromisoformat(value["created_at"]))
 
 

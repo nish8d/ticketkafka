@@ -1,10 +1,12 @@
+from datetime import UTC, datetime
+
 import httpx
 import pytest
 from confluent_kafka.schema_registry.error import SchemaRegistryError
 from pydantic import ValidationError
 
 from pipeline import config
-from pipeline.models import EnrichedTicket, Ticket
+from pipeline.models import EnrichedTicket, Ticket, TicketStats
 from pipeline.serde import (
     EnrichedTicketSerde,
     SchemaNotRegistered,
@@ -267,3 +269,9 @@ def test_enriched_serde_rejects_a_plain_ticket_message(enriched_serde, serde_v2,
     # A Ticket record is not an EnrichedTicket (different name, missing fields): bad data, DLQ-able.
     with pytest.raises(UndecodableMessage):
         enriched_serde.decode(serde_v2.encode(ticket, "tickets.raw"), "tickets.tech")
+
+
+def test_stats_round_trip(stats_serde):
+    stats = TicketStats(dimension="priority", value="urgent", window_start=datetime(2026, 9, 30, 12, 0, tzinfo=UTC),
+                        window_end=datetime(2026, 9, 30, 12, 5, tzinfo=UTC), count=7)
+    assert stats_serde.decode(stats_serde.encode(stats, "tickets.stats"), "tickets.stats") == stats

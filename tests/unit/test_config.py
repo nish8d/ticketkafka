@@ -30,3 +30,19 @@ def test_stage_5_routing_topics_are_defined():
         assert specs[name].partitions == 3
     assert config.ENRICHED_TOPICS == ("tickets.billing", "tickets.tech", "tickets.urgent", "tickets.enriched.other")
     assert config.ENRICHED_SCHEMA_V1 == config.SCHEMA_DIR / "enriched_ticket.v1.avsc"
+
+
+def test_stage_6_topics_are_defined():
+    specs = {s.name: s for s in config.TOPIC_SPECS}
+    assert specs["tickets.stats"].partitions == 3
+    assert specs["tickets.stats"].config == {}
+    latest = specs["customers.latest"]
+    assert latest.partitions == 3
+    assert latest.config == {"cleanup.policy": "compact", "segment.ms": "60000", "min.cleanable.dirty.ratio": "0.01"}
+
+
+def test_aggregator_reads_every_enriched_ticket_exactly_once():
+    # tickets.urgent only holds copies of tickets that are also in a category topic.
+    assert config.AGGREGATOR_INPUTS == ("tickets.billing", "tickets.tech", "tickets.enriched.other")
+    assert config.TOPIC_URGENT not in config.AGGREGATOR_INPUTS
+    assert config.STATS_SCHEMA_V1 == config.SCHEMA_DIR / "ticket_stats.v1.avsc"

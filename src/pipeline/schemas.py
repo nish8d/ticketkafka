@@ -25,7 +25,9 @@ COMPATIBILITY = "BACKWARD"
 # Which topics a schema belongs to, by its Avro record name — so `register FILE` needs no --topic.
 TOPICS_BY_RECORD: dict[str, tuple[str, ...]] = {
     "pipeline.tickets.Ticket": TICKET_TOPICS,
-    "pipeline.tickets.EnrichedTicket": config.ENRICHED_TOPICS,
+    # customers.latest holds whole enriched tickets too (the newest per customer).
+    "pipeline.tickets.EnrichedTicket": (*config.ENRICHED_TOPICS, config.TOPIC_CUSTOMERS_LATEST),
+    "pipeline.stats.TicketStats": (config.TOPIC_STATS,),
 }
 
 

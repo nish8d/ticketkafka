@@ -90,7 +90,8 @@ def test_cli_requires_a_subcommand():
 
 def test_default_topics_follow_the_schemas_record_name():
     assert topics_for_schema(load_schema(config.TICKET_SCHEMA_V2)) == ("tickets.raw", "tickets.valid")
-    assert topics_for_schema(load_schema(config.ENRICHED_SCHEMA_V1)) == config.ENRICHED_TOPICS
+    assert topics_for_schema(load_schema(config.ENRICHED_SCHEMA_V1)) == (*config.ENRICHED_TOPICS, "customers.latest")
+    assert topics_for_schema(load_schema(config.STATS_SCHEMA_V1)) == ("tickets.stats",)
 
 
 def test_unknown_record_name_asks_for_explicit_topics():

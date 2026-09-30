@@ -4,7 +4,7 @@ import fastavro
 import pytest
 
 from pipeline import config
-from pipeline.models import CATEGORIES, CHANNELS, PRIORITIES, TIERS, EnrichedTicket, Ticket
+from pipeline.models import CATEGORIES, CHANNELS, PRIORITIES, TIERS, DIMENSIONS, EnrichedTicket, Ticket, TicketStats
 
 
 def _load(path) -> dict:
@@ -15,7 +15,8 @@ def _fields(schema: dict) -> dict[str, dict]:
     return {f["name"]: f for f in schema["fields"]}
 
 
-SCHEMA_FILES = ["ticket.v1.avsc", "ticket.v2.avsc", "ticket.v3-breaking.avsc", "enriched_ticket.v1.avsc"]
+SCHEMA_FILES = ["ticket.v1.avsc", "ticket.v2.avsc", "ticket.v3-breaking.avsc", "enriched_ticket.v1.avsc",
+                "ticket_stats.v1.avsc"]
 
 
 def test_all_schema_files_exist():
@@ -62,3 +63,15 @@ def test_enriched_schema_reuses_the_ticket_v2_fields():
     ticket_fields = _fields(_load(config.TICKET_SCHEMA_V2))
     enriched_fields = _fields(_load(config.ENRICHED_SCHEMA_V1))
     assert {k: enriched_fields[k] for k in ticket_fields} == ticket_fields
+
+
+def test_stats_schema_has_exactly_the_model_fields():
+    assert set(_fields(_load(config.STATS_SCHEMA_V1))) == set(TicketStats.model_fields)
+
+
+def test_stats_schema_enum_and_timestamps_match_the_model():
+    fields = _fields(_load(config.STATS_SCHEMA_V1))
+    assert tuple(fields["dimension"]["type"]["symbols"]) == DIMENSIONS
+    for name in ("window_start", "window_end"):
+        assert fields[name]["type"] == {"type": "long", "logicalType": "timestamp-millis"}
+    assert fields["count"]["type"] == "long"

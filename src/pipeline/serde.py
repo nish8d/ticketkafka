@@ -13,7 +13,7 @@ from confluent_kafka.serialization import MessageField, SerializationContext
 from pydantic import BaseModel
 
 from pipeline import config
-from pipeline.models import EnrichedTicket, Ticket
+from pipeline.models import EnrichedTicket, Ticket, TicketStats
 
 # The registry's own "no such schema/subject" codes (40400 is what the in-memory mock uses). Any other
 # 404 — a proxy, a wrong URL — says nothing about the message, so it's treated as infrastructure.
@@ -115,3 +115,7 @@ class TicketSerde(AvroSerde):
 
 class EnrichedTicketSerde(AvroSerde):
     model = EnrichedTicket
+
+
+class TicketStatsSerde(AvroSerde):
+    model = TicketStats

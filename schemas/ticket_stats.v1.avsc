@@ -1,0 +1,14 @@
+{
+  "type": "record",
+  "name": "TicketStats",
+  "namespace": "pipeline.stats",
+  "doc": "How many tickets had one category or one priority in one closed tumbling window. v1. Produced by the aggregator to tickets.stats.",
+  "fields": [
+    {"name": "dimension", "type": {"type": "enum", "name": "Dimension", "symbols": ["category", "priority"]},
+     "doc": "What was counted"},
+    {"name": "value", "type": "string", "doc": "A category (billing, technical, account, other) or a priority (low .. urgent)"},
+    {"name": "window_start", "type": {"type": "long", "logicalType": "timestamp-millis"}, "doc": "Inclusive, UTC"},
+    {"name": "window_end", "type": {"type": "long", "logicalType": "timestamp-millis"}, "doc": "Exclusive, UTC"},
+    {"name": "count", "type": "long"}
+  ]
+}

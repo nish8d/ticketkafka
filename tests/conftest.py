@@ -72,6 +72,11 @@ def fake_producer() -> FakeProducer:
     return FakeProducer()
 
 
+@pytest.fixture
+def raw_message():
+    """Build a consumed message as confluent-kafka hands it over (partition 0, offset 0)."""
+    return lambda topic, key, value, headers=None: FakeMessage(topic, key, value, headers)
+
 
 @pytest.fixture
 def mock_registry():

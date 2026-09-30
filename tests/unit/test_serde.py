@@ -238,15 +238,16 @@ def test_ensure_registered_propagates_a_404_that_is_not_from_the_registry(mock_r
 
 
 def test_decode_only_asks_the_registry_for_the_writer_schema(mock_registry, avro_topic, ticket, monkeypatch):
-    # The client's default ("associated") subject strategy makes its own registry call while decoding —
-    # inside the phase where every error counts as bad bytes. We pin the plain topic strategy instead.
+    # Newer clients' default ("associated") subject strategy makes its own registry call while
+    # decoding, inside the phase where every error counts as bad bytes. We pin the plain topic
+    # strategy instead. raising=False: that registry method only exists in clients >= 2.12.
     value = TicketSerde(mock_registry, load_schema(config.TICKET_SCHEMA_V2)).encode(ticket, avro_topic)
     fresh = TicketSerde(mock_registry, load_schema(config.TICKET_SCHEMA_V2))
 
     def down(*args, **kwargs):
         raise httpx.ConnectError("connection refused")
 
-    monkeypatch.setattr(mock_registry, "get_associations_by_resource_name", down)
+    monkeypatch.setattr(mock_registry, "get_associations_by_resource_name", down, raising=False)
     assert fresh.decode(value, avro_topic) == ticket
 
 

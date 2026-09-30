@@ -6,7 +6,7 @@ Avro resolves one into the other (filling defaults for fields the writer didn't 
 """
 from pathlib import Path
 
-from confluent_kafka.schema_registry import Schema, SchemaRegistryClient
+from confluent_kafka.schema_registry import Schema, SchemaRegistryClient, topic_subject_name_strategy
 from confluent_kafka.schema_registry.avro import AvroDeserializer, AvroSerializer
 from confluent_kafka.schema_registry.error import SchemaRegistryError
 from confluent_kafka.serialization import MessageField, SerializationContext
@@ -66,12 +66,14 @@ class AvroSerde:
         self._registry = registry
         # auto.register.schemas=False: producers may only use schemas someone registered on purpose,
         # so the registry's compatibility check can't be bypassed by just deploying new code.
-        # TOPIC = subject_for(): "<topic>-value". Set explicitly because the client's default strategy
-        # asks the registry for the subject, and decode() relies on phase 2 making no network calls.
+        # topic_subject_name_strategy = subject_for(): "<topic>-value". Pinned explicitly because newer
+        # clients default to a strategy that asks the registry for the subject, and decode() relies on
+        # phase 2 making no network calls.
         self._serializer = AvroSerializer(registry, schema_str, conf={
-            "auto.register.schemas": False, "subject.name.strategy.type": "TOPIC"})
+            "auto.register.schemas": False, "subject.name.strategy": topic_subject_name_strategy})
         # Passing schema_str makes it the reader schema: every writer version is resolved into it.
-        self._deserializer = AvroDeserializer(registry, schema_str, conf={"subject.name.strategy.type": "TOPIC"})
+        self._deserializer = AvroDeserializer(registry, schema_str,
+                                              conf={"subject.name.strategy": topic_subject_name_strategy})
 
     def encode(self, obj: BaseModel, topic: str) -> bytes:
         # model_dump() keeps UUID/datetime objects, which Avro's uuid/timestamp-millis types expect.

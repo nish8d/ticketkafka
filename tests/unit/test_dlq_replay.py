@@ -1,5 +1,7 @@
 import logging
 
+from confluent_kafka import TopicPartition
+
 from pipeline import dlq_replay
 from pipeline.dlq_replay import header_map, reached_snapshot, replay_target, run_replay
 
@@ -39,6 +41,12 @@ class _FakeIdleConsumer:
 
     def poll(self, timeout):
         return None
+
+    def assignment(self):
+        return [TopicPartition("tickets.dlq", 0)]
+
+    def position(self, partitions):
+        return [TopicPartition("tickets.dlq", 0, 0)]  # stuck before the snapshot's offset 5
 
     def close(self):
         pass

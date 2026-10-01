@@ -124,3 +124,28 @@ def test_replay_warns_when_dlq_topic_has_no_partitions(caplog):
 
     assert stats.seen == 0
     assert any("no partitions" in record.message for record in caplog.records)
+
+
+def test_replay_finishes_promptly_when_the_dlq_ends_in_transaction_markers(make_topic, caplog):
+    # The transactional enricher dead-letters inside its transactions, so each DLQ partition can end
+    # in a COMMIT marker (and hold aborted entries) that a read_committed consumer never receives.
+    dlq, target = make_topic("dlq"), make_topic("raw")
+    transactional_id = f"test-replay-txn-{uuid.uuid4().hex[:8]}"
+    producer = Producer({**producer_config(), "transactional.id": transactional_id})
+    producer.init_transactions(10)
+    producer.begin_transaction()
+    producer.produce(dlq, key=b"C-0001", value=b"aborted", headers=[("source.topic", target.encode())])
+    producer.abort_transaction(10)
+    producer.begin_transaction()
+    producer.produce(dlq, key=b"C-0001", value=b"kept", headers=[("source.topic", target.encode())])
+    producer.commit_transaction(10)
+    group = f"test-replay-txn-{uuid.uuid4().hex[:8]}"
+
+    for expected in (1, 0):  # the second run has nothing left to replay
+        started = time.monotonic()
+        with caplog.at_level(logging.WARNING, logger="dlq_replay"):
+            stats = run_replay(Consumer(consumer_config(group)), Producer(producer_config()), dlq,
+                               idle_timeout=5.0)
+        assert time.monotonic() - started < 4.0  # ended by the snapshot check, not the idle timeout
+        assert stats.replayed == expected
+        assert not any("idle timeout" in record.message for record in caplog.records)

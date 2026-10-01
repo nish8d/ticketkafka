@@ -38,9 +38,10 @@ classifies, aggregates and stores them.
 | 5 | **Enricher**: LLM classification → routed topics; run several | Scaling, rebalancing, consumer lag, retries, backpressure |
 | 6 | **Aggregator** (Quix Streams): tumbling-window counts, latest ticket per customer | Event time, windows and grace, state stores, changelog topics, compaction |
 | 7 | **Kafka Connect** JDBC sinks → Postgres; Streamlit dashboard | Connectors and tasks, converters, SMTs, idempotent upserts, Connect's DLQ |
+| 8 | **Transactional enricher**: each batch's outputs and offsets in one Kafka transaction | Exactly-once, transactional producers, fencing, `read_committed`, abort markers |
 
-Stages 1–5 use the plain `confluent-kafka` client with hand-written poll loops and commits, so every
-mechanism is visible. Stage 6 uses a stream-processing library and stage 7 uses Kafka Connect.
+Stages 1–5 and 8 use the plain `confluent-kafka` client with hand-written poll loops and commits, so
+every mechanism is visible. Stage 6 uses a stream-processing library and stage 7 uses Kafka Connect.
 
 ## Requirements
 
@@ -96,7 +97,7 @@ Postgres is published on **5433**, so it doesn't clash with a Postgres already r
 | `uv run python -m pipeline.schemas register\|check FILE` / `list` | Register a schema, check its compatibility first, or list subjects |
 | `uv run python -m pipeline.generator [--count N] [--rate R] [--model M] [--bad-ratio 0.05] [--seed S]` | Produce LLM-written tickets, with a share deliberately broken to exercise the DLQ |
 | `uv run python -m pipeline.validator` | `tickets.raw` → `tickets.valid`, or `tickets.dlq` for bad tickets |
-| `uv run python -m pipeline.enricher [--model M] [--batch-size 4]` | Classify tickets and route them by category; start several to share the work |
+| `uv run python -m pipeline.enricher [--model M] [--batch-size 4] [--instance N] [--at-least-once]` | Classify tickets and route them by category, in one transaction per batch; start several (each with its own `--instance`) to share the work |
 | `uv run python -m pipeline.aggregator [--window-seconds 300] [--grace-seconds 60]` | Windowed counts → `tickets.stats`, latest ticket per customer → `customers.latest` |
 | `uv run python -m pipeline.dlq_replay [--dry-run] [--limit N]` | Send dead-lettered messages back to their source topic |
 | `uv run python -m pipeline.connectors apply\|status\|restart\|delete [NAME]` | Manage the Kafka Connect sinks defined in `connect/*.json` |
@@ -136,9 +137,12 @@ uv run pytest -m integration   # needs `docker compose up -d --build`
 
 ## Design notes
 
-- **At-least-once everywhere.** Offsets are committed only after the output is acknowledged. A
-  crash means some messages are processed again; `ticket_id` is the idempotency key, and the Postgres
-  sinks upsert on it, so duplicates collapse.
+- **At-least-once almost everywhere, exactly-once in the enricher.** Offsets are committed only after
+  the output is acknowledged, so a crash means some messages are processed again; `ticket_id` is the
+  idempotency key and the Postgres sinks upsert on it, so duplicates collapse. The enricher goes
+  further: each batch's outputs and offsets commit in one Kafka transaction, and every reader uses
+  `isolation.level=read_committed`, so a crashed batch leaves no duplicates at all
+  (`--at-least-once` switches back, for comparison).
 - **Dead-letter queues keep the original bytes.** The reason goes in headers, so a fixed message
   can be replayed unchanged.
 - **Logic lives in pure functions.** Validation, routing, prompt parsing and windowing are tested

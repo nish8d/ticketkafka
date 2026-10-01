@@ -151,8 +151,11 @@ def build_app(topics: Topics, registry, *, group: str, state_dir: Path, window_m
         auto_offset_reset="earliest",
         state_dir=state_dir,
         # At-least-once: offsets and state are committed together at each checkpoint (every 5 s); a
-        # crash redoes the work since the last one. Exactly-once is stage 8.
+        # crash redoes the work since the last one. (The enricher upstream is exactly-once, stage 8.)
         processing_guarantee="at-least-once",
+        # Skip the transactional enricher's aborted batches. Quix only sets this itself in its
+        # exactly-once mode; librdkafka's default is the same, but say so.
+        consumer_extra_config={"isolation.level": "read_committed"},
         on_consumer_error=make_consumer_error_handler(dlq_producer, topics.dlq),
     )
     enriched = EnrichedTicketSerde(registry, load_schema(config.ENRICHED_SCHEMA_V1))

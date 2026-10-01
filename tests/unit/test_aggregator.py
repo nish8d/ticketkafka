@@ -200,3 +200,23 @@ def test_cli_help_prints_no_third_party_warnings():
     assert result.returncode == 0
     assert "--window-seconds" in result.stdout
     assert result.stderr == ""
+
+
+def test_the_aggregator_reads_committed_data_only(monkeypatch, mock_registry, tmp_path):
+    from pipeline import aggregator
+
+    class _Built(Exception):
+        pass
+
+    captured = {}
+
+    def fake_application(**kwargs):
+        captured.update(kwargs)
+        raise _Built
+
+    monkeypatch.setattr(aggregator, "Application", fake_application)
+    with pytest.raises(_Built):
+        aggregator.build_app(aggregator.Topics(), mock_registry, group="g", state_dir=tmp_path,
+                             window_ms=1000, grace_ms=0, dlq_producer=None)
+    assert captured["consumer_extra_config"] == {"isolation.level": "read_committed"}
+    assert captured["processing_guarantee"] == "at-least-once"  # the aggregator itself stays at-least-once

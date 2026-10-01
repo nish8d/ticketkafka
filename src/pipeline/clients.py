@@ -24,6 +24,18 @@ def producer_config() -> dict:
     }
 
 
+def transactional_producer_config(transactional_id: str) -> dict:
+    """producer_config() plus a transactional.id, so outputs and consumer offsets commit atomically."""
+    return {
+        **producer_config(),
+        # Stable per instance: on restart, init_transactions() fences the previous producer with this
+        # id and aborts its unfinished transaction straight away.
+        "transactional.id": transactional_id,
+        # The default, and plenty: a transaction spans only one batch's writes, never the LLM calls.
+        "transaction.timeout.ms": 60_000,
+    }
+
+
 def consumer_config(group_id: str, **overrides) -> dict:
     conf = {
         "bootstrap.servers": config.BOOTSTRAP_SERVERS,
@@ -33,6 +45,10 @@ def consumer_config(group_id: str, **overrides) -> dict:
         "auto.offset.reset": "earliest",
         # We commit ourselves, only after our outputs are safely written: at-least-once.
         "enable.auto.commit": False,
+        # Never deliver messages from aborted (or still open) transactions — the transactional
+        # enricher's crashed batches. librdkafka's default already; Java clients default to
+        # read_uncommitted, so say it explicitly.
+        "isolation.level": "read_committed",
     }
     conf.update(overrides)
     return conf

@@ -33,6 +33,10 @@ def consumer_config(group_id: str, **overrides) -> dict:
         "auto.offset.reset": "earliest",
         # We commit ourselves, only after our outputs are safely written: at-least-once.
         "enable.auto.commit": False,
+        # Never deliver messages from aborted (or still open) transactions — the transactional
+        # enricher's crashed batches. librdkafka's default already; Java clients default to
+        # read_uncommitted, so say it explicitly.
+        "isolation.level": "read_committed",
     }
     conf.update(overrides)
     return conf

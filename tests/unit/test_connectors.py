@@ -71,6 +71,9 @@ def test_both_sinks_share_the_write_and_error_policy(connectors):
         # sink consumer's max.poll.interval.ms (5 min), so the task isn't dropped from its group meanwhile.
         "connection.attempts": "24",
         "connection.backoff.ms": "10000",
+        # Connect is a Java client, which defaults to read_uncommitted: without this the sinks would
+        # write the transactional enricher's aborted outputs to Postgres.
+        "consumer.override.isolation.level": "read_committed",
         "errors.tolerance": "all",
         "errors.deadletterqueue.topic.name": config.TOPIC_SINK_DLQ,
         "errors.deadletterqueue.topic.replication.factor": "1",

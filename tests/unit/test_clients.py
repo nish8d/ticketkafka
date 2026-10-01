@@ -56,3 +56,9 @@ def test_commit_batch_survives_losing_the_partitions_mid_batch(caplog):
     lost = KafkaException(KafkaError(KafkaError._WAIT_COORD, "Commit failed: Local: Waiting for coordinator"))
     assert commit_batch(_Consumer(lost)) is False
     assert "redo" in caplog.text
+
+
+def test_consumers_read_committed_data_only():
+    # Aborted (or still open) transactions from the transactional enricher are never delivered.
+    assert consumer_config("g")["isolation.level"] == "read_committed"
+    assert slow_consumer_config("g", 600_000)["isolation.level"] == "read_committed"

@@ -76,6 +76,14 @@ def run_replay(consumer, producer, dlq_topic: str, limit: int | None = None, dry
         while (limit is None or stats.seen < limit) and not reached_snapshot(snapshot_highs, next_offsets):
             msg = consumer.poll(0.5)
             if msg is None:
+                # A read_committed consumer never receives transaction markers or aborted messages
+                # (the transactional enricher dead-letters inside its transactions), so "last offset
+                # + 1" can stop short of the snapshot. The consumer's position moves past them.
+                for tp in consumer.position(consumer.assignment()):
+                    if tp.offset >= 0:
+                        next_offsets[tp.partition] = max(next_offsets.get(tp.partition, 0), tp.offset)
+                if reached_snapshot(snapshot_highs, next_offsets):
+                    break
                 if time.monotonic() - last_message_at > idle_timeout:
                     log.warning("idle timeout (%.1fs) reached before catching up to the snapshot; "
                                "some DLQ messages may remain unreplayed", idle_timeout)

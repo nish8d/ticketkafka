@@ -8,8 +8,10 @@ dependencies = [
     "confluent-kafka[avro,schemaregistry]>=2.8,<2.12",
     "httpx>=0.27",
     "ollama>=0.6",
+    "psycopg[binary]>=3.3",
     "pydantic>=2.13",
     "quixstreams[avro]>=3.26,<4",
+    "streamlit>=1.64",
 ]
 
 [dependency-groups]

@@ -54,6 +54,70 @@ services:
       kafka:
         condition: service_healthy
 
+  postgres:
+    image: postgres:16
+    container_name: postgres
+    ports:
+      # 5433 on the host: the laptop may already run its own Postgres on 5432.
+      - "5433:5432"
+    environment:
+      # Local demo credentials.
+      POSTGRES_USER: tickets
+      POSTGRES_PASSWORD: tickets
+      POSTGRES_DB: tickets
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      # Run once, when the data volume is first created.
+      - ./connect/sql/init.sql:/docker-entrypoint-initdb.d/init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U tickets -d tickets"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  connect:
+    build: ./connect
+    image: ticket-pipeline-connect
+    container_name: connect
+    ports:
+      - "8083:8083"
+    environment:
+      CONNECT_BOOTSTRAP_SERVERS: kafka:29092
+      CONNECT_REST_PORT: 8083
+      CONNECT_REST_ADVERTISED_HOST_NAME: connect
+      # Workers with the same group id form one Connect cluster and share the connectors' tasks.
+      CONNECT_GROUP_ID: connect-cluster
+      # Connect keeps its own state in Kafka: connector configs, source offsets, connector/task status.
+      # (Sink connectors track their progress as an ordinary consumer group, connect-<name>.)
+      CONNECT_CONFIG_STORAGE_TOPIC: connect-configs
+      CONNECT_OFFSET_STORAGE_TOPIC: connect-offsets
+      CONNECT_STATUS_STORAGE_TOPIC: connect-status
+      # Single broker, so one replica each.
+      CONNECT_CONFIG_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_OFFSET_STORAGE_REPLICATION_FACTOR: 1
+      CONNECT_STATUS_STORAGE_REPLICATION_FACTOR: 1
+      # Converters turn Kafka bytes into Connect records. Our keys are plain strings; values are the
+      # same Avro our Python services write, looked up in Schema Registry by the id in each message.
+      CONNECT_KEY_CONVERTER: org.apache.kafka.connect.storage.StringConverter
+      CONNECT_VALUE_CONVERTER: io.confluent.connect.avro.AvroConverter
+      CONNECT_VALUE_CONVERTER_SCHEMA_REGISTRY_URL: http://schema-registry:8081
+      CONNECT_PLUGIN_PATH: /usr/share/java,/usr/share/confluent-hub-components
+      # The container still uses ~950 MB in all (JVM overhead on top of the heap).
+      KAFKA_HEAP_OPTS: "-Xms512m -Xmx512m"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fs http://localhost:8083/connectors > /dev/null"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 60s
+    depends_on:
+      kafka:
+        condition: service_healthy
+      schema-registry:
+        condition: service_healthy
+      postgres:
+        condition: service_healthy
+
   kafka-ui:
     image: kafbat/kafka-ui:v1.5.0
     container_name: kafka-ui
@@ -63,8 +127,14 @@ services:
       KAFKA_CLUSTERS_0_NAME: local
       KAFKA_CLUSTERS_0_BOOTSTRAPSERVERS: kafka:29092
       KAFKA_CLUSTERS_0_SCHEMAREGISTRY: http://schema-registry:8081
+      # Adds a Connectors view (connector and task states, configs).
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_NAME: local
+      KAFKA_CLUSTERS_0_KAFKACONNECT_0_ADDRESS: http://connect:8083
     depends_on:
       kafka:
         condition: service_healthy
       schema-registry:
         condition: service_healthy
+
+volumes:
+  postgres-data:

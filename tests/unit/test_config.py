@@ -46,3 +46,15 @@ def test_aggregator_reads_every_enriched_ticket_exactly_once():
     assert config.AGGREGATOR_INPUTS == ("tickets.billing", "tickets.tech", "tickets.enriched.other")
     assert config.TOPIC_URGENT not in config.AGGREGATOR_INPUTS
     assert config.STATS_SCHEMA_V1 == config.SCHEMA_DIR / "ticket_stats.v1.avsc"
+
+
+def test_stage_7_settings():
+    specs = {s.name: s for s in config.TOPIC_SPECS}
+    assert config.TOPIC_SINK_DLQ == "tickets.sink.dlq"
+    assert specs["tickets.sink.dlq"].partitions == 1
+    assert specs["tickets.sink.dlq"].config == specs["tickets.dlq"].config  # 30-day retention, like tickets.dlq
+    assert config.CONNECT_URL == "http://localhost:8083"
+    # 5433, not 5432: the host may already run its own Postgres on 5432.
+    assert config.POSTGRES_DSN == "postgresql://tickets:tickets@localhost:5433/tickets"
+    assert config.CONNECT_DIR.name == "connect"
+    assert config.SINK_TABLES_SQL == config.CONNECT_DIR / "sql" / "init.sql"

@@ -1,4 +1,6 @@
 import pipeline  # noqa: F401  # isort: skip — first, so its warning filter is in place before the registry client loads
+import re
+
 import pytest
 from confluent_kafka.schema_registry import Schema
 
@@ -117,3 +119,31 @@ def enriched_serde(mock_registry) -> EnrichedTicketSerde:
 @pytest.fixture
 def stats_serde(mock_registry) -> TicketStatsSerde:
     return TicketStatsSerde(mock_registry, load_schema(config.STATS_SCHEMA_V1))
+
+
+def _parse_tables(sql: str) -> dict[str, tuple[list[str], tuple[str, ...]]]:
+    """{table: (columns, primary key)} from the CREATE TABLE statements in init.sql. Just enough parsing
+    for our own file: one column per line, the closing ");" on its own line."""
+    tables = {}
+    sql = re.sub(r"--[^\n]*", "", sql)
+    for name, body in re.findall(r"CREATE TABLE (\w+) \((.*?)\n\);", sql, re.S):
+        columns: list[str] = []
+        primary_key: tuple[str, ...] = ()
+        for line in (raw.strip().rstrip(",") for raw in body.splitlines()):
+            if not line:
+                continue
+            if line.startswith("PRIMARY KEY"):
+                inside = line[line.index("(") + 1:line.index(")")]
+                primary_key = tuple(column.strip() for column in inside.split(","))
+                continue
+            column = line.split()[0]
+            columns.append(column)
+            if "PRIMARY KEY" in line:
+                primary_key = (column,)
+        tables[name] = (columns, primary_key)
+    return tables
+
+
+@pytest.fixture(scope="session")
+def sink_tables() -> dict[str, tuple[list[str], tuple[str, ...]]]:
+    return _parse_tables(config.SINK_TABLES_SQL.read_text())

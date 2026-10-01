@@ -4,10 +4,12 @@ version = "0.1.0"
 description = "Learning Kafka with an LLM-generated support-ticket pipeline"
 requires-python = ">=3.12"
 dependencies = [
-    "confluent-kafka[avro]>=2.15",
+    # <2.12 because Quix Streams (stage 6) pins it; nothing here needs a newer client.
+    "confluent-kafka[avro,schemaregistry]>=2.8,<2.12",
     "httpx>=0.27",
     "ollama>=0.6",
     "pydantic>=2.13",
+    "quixstreams[avro]>=3.26,<4",
 ]
 
 [dependency-groups]

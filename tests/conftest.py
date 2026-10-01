@@ -3,7 +3,7 @@ import pytest
 from confluent_kafka.schema_registry import Schema
 
 from pipeline import config
-from pipeline.serde import EnrichedTicketSerde, TicketSerde, load_schema, make_registry, subject_for
+from pipeline.serde import EnrichedTicketSerde, TicketSerde, TicketStatsSerde, load_schema, make_registry, subject_for
 
 
 @pytest.fixture
@@ -72,16 +72,25 @@ def fake_producer() -> FakeProducer:
     return FakeProducer()
 
 
+@pytest.fixture
+def raw_message():
+    """Build a consumed message as confluent-kafka hands it over (partition 0, offset 0)."""
+    return lambda topic, key, value, headers=None: FakeMessage(topic, key, value, headers)
+
 
 @pytest.fixture
 def mock_registry():
-    """An in-memory registry (no network): ticket v1+v2 for raw/valid, enriched v1 for the routed topics."""
+    """An in-memory registry (no network): ticket v1+v2 for raw/valid, enriched v1 for the routed topics,
+    and also for customers.latest, tickets.stats-value (TicketStats v1) and customers.latest-value (EnrichedTicket v1)."""
     registry = make_registry("mock://unit-tests")
     for topic in (config.TOPIC_RAW, config.TOPIC_VALID):
         for path in (config.TICKET_SCHEMA_V1, config.TICKET_SCHEMA_V2):
             registry.register_schema(subject_for(topic), Schema(load_schema(path), "AVRO"))
     for topic in config.ENRICHED_TOPICS:
         registry.register_schema(subject_for(topic), Schema(load_schema(config.ENRICHED_SCHEMA_V1), "AVRO"))
+    registry.register_schema(subject_for(config.TOPIC_CUSTOMERS_LATEST),
+                             Schema(load_schema(config.ENRICHED_SCHEMA_V1), "AVRO"))
+    registry.register_schema(subject_for(config.TOPIC_STATS), Schema(load_schema(config.STATS_SCHEMA_V1), "AVRO"))
     return registry
 
 
@@ -103,3 +112,8 @@ def avro_topic() -> str:
 @pytest.fixture
 def enriched_serde(mock_registry) -> EnrichedTicketSerde:
     return EnrichedTicketSerde(mock_registry, load_schema(config.ENRICHED_SCHEMA_V1))
+
+
+@pytest.fixture
+def stats_serde(mock_registry) -> TicketStatsSerde:
+    return TicketStatsSerde(mock_registry, load_schema(config.STATS_SCHEMA_V1))

@@ -14,6 +14,7 @@ TICKET_SCHEMA_V1 = SCHEMA_DIR / "ticket.v1.avsc"
 TICKET_SCHEMA_V2 = SCHEMA_DIR / "ticket.v2.avsc"
 DEFAULT_TICKET_SCHEMA = TICKET_SCHEMA_V2
 ENRICHED_SCHEMA_V1 = SCHEMA_DIR / "enriched_ticket.v1.avsc"
+STATS_SCHEMA_V1 = SCHEMA_DIR / "ticket_stats.v1.avsc"
 
 TOPIC_RAW = "tickets.raw"
 TOPIC_VALID = "tickets.valid"
@@ -23,6 +24,13 @@ TOPIC_TECH = "tickets.tech"
 TOPIC_URGENT = "tickets.urgent"
 TOPIC_ENRICHED_OTHER = "tickets.enriched.other"
 ENRICHED_TOPICS: tuple[str, ...] = (TOPIC_BILLING, TOPIC_TECH, TOPIC_URGENT, TOPIC_ENRICHED_OTHER)
+
+# Written by the aggregator (stage 6).
+TOPIC_STATS = "tickets.stats"
+TOPIC_CUSTOMERS_LATEST = "customers.latest"
+# Every enriched ticket exactly once: tickets.urgent only holds copies, so reading it would count
+# urgent tickets twice.
+AGGREGATOR_INPUTS: tuple[str, ...] = (TOPIC_BILLING, TOPIC_TECH, TOPIC_ENRICHED_OTHER)
 
 
 @dataclass(frozen=True)
@@ -40,4 +48,10 @@ TOPIC_SPECS = [
     TopicSpec(TOPIC_DLQ, 1, {"retention.ms": str(30 * 24 * 3600 * 1000)}),
     # Routed by the enricher. 3 partitions each: smaller, downstream topics.
     *(TopicSpec(name, 3) for name in ENRICHED_TOPICS),
+    TopicSpec(TOPIC_STATS, 3),
+    # Compacted: Kafka eventually keeps only the newest message per key, so the topic behaves like
+    # a table of customers. Tiny segments and a low dirty ratio make the cleaner run within minutes,
+    # for the demo. Production would keep the defaults (7-day segments, dirty ratio 0.5).
+    TopicSpec(TOPIC_CUSTOMERS_LATEST, 3,
+              {"cleanup.policy": "compact", "segment.ms": "60000", "min.cleanable.dirty.ratio": "0.01"}),
 ]

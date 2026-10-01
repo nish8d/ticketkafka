@@ -1,10 +1,12 @@
+from datetime import UTC, datetime
+
 import httpx
 import pytest
 from confluent_kafka.schema_registry.error import SchemaRegistryError
 from pydantic import ValidationError
 
 from pipeline import config
-from pipeline.models import EnrichedTicket, Ticket
+from pipeline.models import EnrichedTicket, Ticket, TicketStats
 from pipeline.serde import (
     EnrichedTicketSerde,
     SchemaNotRegistered,
@@ -238,15 +240,16 @@ def test_ensure_registered_propagates_a_404_that_is_not_from_the_registry(mock_r
 
 
 def test_decode_only_asks_the_registry_for_the_writer_schema(mock_registry, avro_topic, ticket, monkeypatch):
-    # The client's default ("associated") subject strategy makes its own registry call while decoding —
-    # inside the phase where every error counts as bad bytes. We pin the plain topic strategy instead.
+    # Newer clients' default ("associated") subject strategy makes its own registry call while
+    # decoding, inside the phase where every error counts as bad bytes. We pin the plain topic
+    # strategy instead. raising=False: that registry method only exists in clients >= 2.12.
     value = TicketSerde(mock_registry, load_schema(config.TICKET_SCHEMA_V2)).encode(ticket, avro_topic)
     fresh = TicketSerde(mock_registry, load_schema(config.TICKET_SCHEMA_V2))
 
     def down(*args, **kwargs):
         raise httpx.ConnectError("connection refused")
 
-    monkeypatch.setattr(mock_registry, "get_associations_by_resource_name", down)
+    monkeypatch.setattr(mock_registry, "get_associations_by_resource_name", down, raising=False)
     assert fresh.decode(value, avro_topic) == ticket
 
 
@@ -266,3 +269,9 @@ def test_enriched_serde_rejects_a_plain_ticket_message(enriched_serde, serde_v2,
     # A Ticket record is not an EnrichedTicket (different name, missing fields): bad data, DLQ-able.
     with pytest.raises(UndecodableMessage):
         enriched_serde.decode(serde_v2.encode(ticket, "tickets.raw"), "tickets.tech")
+
+
+def test_stats_round_trip(stats_serde):
+    stats = TicketStats(dimension="priority", value="urgent", window_start=datetime(2026, 9, 30, 12, 0, tzinfo=UTC),
+                        window_end=datetime(2026, 9, 30, 12, 5, tzinfo=UTC), count=7)
+    assert stats_serde.decode(stats_serde.encode(stats, "tickets.stats"), "tickets.stats") == stats

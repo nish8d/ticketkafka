@@ -1,7 +1,9 @@
+from datetime import UTC, datetime
+
 import pytest
 from pydantic import ValidationError
 
-from pipeline.models import CATEGORIES, CHANNELS, PRIORITIES, TIERS, EnrichedTicket, Ticket
+from pipeline.models import CATEGORIES, CHANNELS, PRIORITIES, TIERS, DIMENSIONS, EnrichedTicket, Ticket, TicketStats
 
 
 def test_valid_ticket_parses(ticket_dict):
@@ -92,3 +94,27 @@ def test_category_and_priority_values():
 def test_invalid_enrichment_is_rejected(ticket_dict, overrides):
     with pytest.raises(ValidationError):
         EnrichedTicket.model_validate(_enriched(ticket_dict, **overrides))
+
+
+def _stats(**overrides) -> dict:
+    return {"dimension": "category", "value": "billing",
+            "window_start": datetime(2026, 9, 30, 12, 0, tzinfo=UTC),
+            "window_end": datetime(2026, 9, 30, 12, 5, tzinfo=UTC), "count": 3, **overrides}
+
+
+def test_ticket_stats_accepts_a_category_or_a_priority():
+    assert TicketStats.model_validate(_stats()).count == 3
+    assert TicketStats.model_validate(_stats(dimension="priority", value="urgent")).value == "urgent"
+    assert DIMENSIONS == ("category", "priority")
+
+
+@pytest.mark.parametrize("overrides", [
+    {"dimension": "channel"},                      # not a dimension we count
+    {"dimension": "category", "value": "urgent"},  # a priority, not a category
+    {"dimension": "priority", "value": "billing"}, # a category, not a priority
+    {"count": 0},                                  # a closed window only exists if something was counted
+    {"window_start": datetime(2026, 9, 30, 12, 0)},  # naive datetime
+])
+def test_ticket_stats_rejects_nonsense(overrides):
+    with pytest.raises(ValidationError):
+        TicketStats.model_validate(_stats(**overrides))

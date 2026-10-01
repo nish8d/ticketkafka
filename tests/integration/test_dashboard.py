@@ -48,7 +48,7 @@ def test_headline_counts_and_medians(conn):
     _ticket(conn, "old", "technical", 0.0, now - timedelta(days=2), enriched_after_s=100, loaded_after_s=100)
     headline = fetch_headline(conn)
     assert (headline.total, headline.last_hour) == (3, 2)
-    # Medians only over tickets loaded in the last hour, so the 2-day-old one doesn't count.
+    # Medians only over tickets classified in the last hour, so the 2-day-old one doesn't count.
     assert headline.classify_seconds == pytest.approx(5.0)
     assert headline.sink_seconds == pytest.approx(2.0)
 
@@ -75,3 +75,15 @@ def test_stats_returns_only_the_latest_windows_of_one_dimension(conn):
     assert len(rows) == 24
     assert rows[0] == (start + timedelta(minutes=5 * 6), "billing", 6)  # oldest of the latest 24, first
     assert {value for _, value, _ in rows} == {"billing"}
+
+
+def test_medians_ignore_a_backlog_loaded_just_now(conn):
+    # Right after `connectors apply`, the backlog is loaded now but was enriched long ago. It must not
+    # count as "classified → in Postgres" latency.
+    now = datetime.now(UTC)
+    _ticket(conn, "live", "billing", 0.0, now - timedelta(seconds=10), enriched_after_s=4, loaded_after_s=1)
+    _ticket(conn, "backlog", "billing", 0.0, now - timedelta(days=2), enriched_after_s=5,
+            loaded_after_s=2 * 24 * 3600 - 10)
+    headline = fetch_headline(conn)
+    assert headline.classify_seconds == pytest.approx(4.0)
+    assert headline.sink_seconds == pytest.approx(1.0)

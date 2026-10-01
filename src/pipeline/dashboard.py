@@ -8,11 +8,12 @@ from psycopg.rows import dict_row
 HEADLINE_SQL = """
 SELECT count(*),
        count(*) FILTER (WHERE created_at > now() - interval '1 hour'),
-       -- Medians over tickets loaded in the last hour, so a replayed backlog doesn't skew them for ever.
+       -- Medians over tickets *classified* in the last hour. Not loaded_at: a backlog loaded just now
+       -- (right after `connectors apply`) was classified long ago and would show days of "latency".
        extract(epoch FROM percentile_cont(0.5) WITHIN GROUP (ORDER BY enriched_at - created_at)
-                          FILTER (WHERE loaded_at > now() - interval '1 hour')),
+                          FILTER (WHERE enriched_at > now() - interval '1 hour')),
        extract(epoch FROM percentile_cont(0.5) WITHIN GROUP (ORDER BY loaded_at - enriched_at)
-                          FILTER (WHERE loaded_at > now() - interval '1 hour'))
+                          FILTER (WHERE enriched_at > now() - interval '1 hour'))
 FROM tickets
 """
 

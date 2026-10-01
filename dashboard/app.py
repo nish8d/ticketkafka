@@ -38,9 +38,9 @@ def panels(dimension: str) -> None:
     total.metric("Tickets in Postgres", f"{headline.total:,}")
     last_hour.metric("Created in the last hour", f"{headline.last_hour:,}")
     classify.metric("Generated → classified (median)", format_duration(headline.classify_seconds),
-                    help="enriched_at − created_at, over tickets loaded in the last hour: mostly LLM time")
+                    help="enriched_at − created_at, over tickets classified in the last hour: mostly LLM time")
     sink.metric("Classified → in Postgres (median)", format_duration(headline.sink_seconds),
-                help="loaded_at − enriched_at, over tickets loaded in the last hour: Kafka plus the Connect sink")
+                help="loaded_at − enriched_at, over tickets classified in the last hour: Kafka plus the Connect sink")
 
     st.subheader(f"Tickets per window, by {dimension}")
     windows, series = pivot_stats(stats, CATEGORIES if dimension == "category" else PRIORITIES)

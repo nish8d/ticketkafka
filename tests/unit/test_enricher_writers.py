@@ -69,6 +69,10 @@ class FakeTxnProducer:
     def poll(self, timeout=0):
         return 0
 
+    def flush(self, timeout=None):
+        self.events.append("flush")
+        return 0
+
     def send_offsets_to_transaction(self, offsets, group_metadata, timeout=None):
         self._call("send_offsets_to_transaction",
                    ("send_offsets", [(tp.topic, tp.partition, tp.offset) for tp in offsets], group_metadata))
@@ -140,7 +144,9 @@ def test_transactional_write_puts_outputs_and_offsets_in_one_transaction():
     assert producer.events == [
         "begin", ("produce", "tickets.billing"), ("produce", "tickets.urgent"),
         ("send_offsets", [("tickets.valid", 0, 8), ("tickets.valid", 1, 10)], "group-metadata"),
-        "hook", "commit"]
+        # Flushed before the commit point, so a crash there (--crash-before-commit, kill -9) leaves the
+        # outputs on the broker as an open transaction rather than lost in the client's buffer.
+        "flush", "hook", "commit"]
     assert writer.mode == "transactional"
 
 

@@ -140,6 +140,10 @@ class Transactional:
             # these partitions to another member meanwhile, they are refused and we must abort.
             self._call(lambda: self.producer.send_offsets_to_transaction(
                 next_offsets(messages), consumer.consumer_group_metadata(), self.timeout))
+            # commit_transaction() flushes anyway; flushing first puts the outputs on the broker (as an
+            # open transaction) before the commit point, so a crash right there leaves them in the log
+            # to be aborted, instead of silently dropped from the client's buffer.
+            self.producer.flush(self.timeout)
             before_commit()
             self._call(lambda: self.producer.commit_transaction(self.timeout))
             return True

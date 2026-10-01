@@ -5,15 +5,16 @@ Run several instances with the same --group to share tickets.valid's partitions 
 import argparse
 import logging
 import os
+import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Callable
 
-from confluent_kafka import Consumer, Producer
+from confluent_kafka import Consumer, KafkaException, Producer, TopicPartition
 
 from pipeline import config
-from pipeline.clients import commit_batch, producer_config, slow_consumer_config
+from pipeline.clients import commit_batch, producer_config, slow_consumer_config, transactional_producer_config
 from pipeline.llm import Classification, LLMError, classify_ticket, make_client
 from pipeline.messages import Output, SourceRef, dlq_headers
 from pipeline.models import EnrichedTicket, Ticket
@@ -48,6 +49,120 @@ class EnricherStats:
     dead_lettered: int = 0
     batches: int = 0
     commit_failures: int = 0
+
+
+class FatalTransactionError(RuntimeError):
+    """The transactional producer can't go on — usually fenced by a newer instance with our transactional.id."""
+
+
+def next_offsets(messages) -> list[TopicPartition]:
+    """The offsets a finished batch commits: per partition, one past the highest offset consumed."""
+    highest: dict[tuple[str, int], int] = {}
+    for msg in messages:
+        key = (msg.topic(), msg.partition())
+        highest[key] = max(highest.get(key, -1), msg.offset())
+    return [TopicPartition(topic, partition, offset + 1) for (topic, partition), offset in sorted(highest.items())]
+
+
+def rewind_positions(messages) -> dict[tuple[str, int], int]:
+    """Where to seek after an aborted batch: per partition, the lowest offset in it."""
+    lowest: dict[tuple[str, int], int] = {}
+    for msg in messages:
+        key = (msg.topic(), msg.partition())
+        lowest[key] = min(lowest.get(key, msg.offset()), msg.offset())
+    return lowest
+
+
+def rewind(consumer, messages) -> None:
+    """Seek back to the start of an aborted batch, on the partitions we still own. Partitions a
+    rebalance gave away are left to their new owner, which resumes from the committed offset."""
+    owned = {(tp.topic, tp.partition) for tp in consumer.assignment()}
+    for (topic, partition), offset in rewind_positions(messages).items():
+        if (topic, partition) in owned:
+            consumer.seek(TopicPartition(topic, partition, offset))
+
+
+class AtLeastOnce:
+    """Stage 5: produce the batch, wait until every output is acknowledged, then commit the inputs.
+    A crash between the two redoes the batch on restart: duplicates possible, loss impossible."""
+    mode = "at-least-once"
+
+    def __init__(self, producer):
+        self.producer = producer
+
+    def start(self) -> None:
+        pass
+
+    def write(self, consumer, outputs: list[Output], messages, before_commit: Callable[[], None]) -> bool:
+        errors: list = []
+
+        def on_delivery(err, msg):
+            if err is not None:
+                errors.append(err)
+
+        for out in outputs:
+            self.producer.produce(out.topic, key=out.key, value=out.value, headers=out.headers or None,
+                                  on_delivery=on_delivery)
+            self.producer.poll(0)
+        remaining = self.producer.flush(30)
+        if remaining or errors:
+            raise RuntimeError(f"outputs not acknowledged ({remaining} pending, errors: {errors}); not committing")
+        before_commit()
+        return commit_batch(consumer)
+
+
+TXN_ATTEMPTS = 3  # for errors the client marks retriable, such as a coordinator timeout
+
+
+class Transactional:
+    """Stage 8: a batch's outputs and its input offsets in one transaction. Readers with
+    isolation.level=read_committed see all of it or none of it, so a crash can't duplicate outputs.
+    The transaction spans only these writes (milliseconds), never the LLM calls: while it is open,
+    read_committed readers can't read past it."""
+    mode = "transactional"
+
+    def __init__(self, producer, timeout: float = 30.0):
+        self.producer, self.timeout = producer, timeout
+
+    def start(self) -> None:
+        # Fences any older producer with our transactional.id and aborts its unfinished transaction.
+        # Must run before the consumer subscribes: until that transaction ends, the group's committed
+        # offsets count as unstable and a new consumer in the group receives nothing.
+        self._call(lambda: self.producer.init_transactions(self.timeout))
+
+    def write(self, consumer, outputs: list[Output], messages, before_commit: Callable[[], None]) -> bool:
+        try:
+            self.producer.begin_transaction()
+            for out in outputs:
+                self.producer.produce(out.topic, key=out.key, value=out.value, headers=out.headers or None)
+                self.producer.poll(0)
+            # The offsets join the transaction, tagged with our group generation: if a rebalance gave
+            # these partitions to another member meanwhile, they are refused and we must abort.
+            self._call(lambda: self.producer.send_offsets_to_transaction(
+                next_offsets(messages), consumer.consumer_group_metadata(), self.timeout))
+            before_commit()
+            self._call(lambda: self.producer.commit_transaction(self.timeout))
+            return True
+        except KafkaException as exc:
+            error = exc.args[0]
+            if error.fatal():
+                raise FatalTransactionError(error.str()) from exc
+            if not error.txn_requires_abort():
+                raise
+            log.warning("transaction aborted (%s); rewinding to redo the batch", error.str())
+            self._call(lambda: self.producer.abort_transaction(self.timeout))
+            rewind(consumer, messages)
+            return False
+
+    def _call(self, fn):
+        for attempt in range(1, TXN_ATTEMPTS + 1):
+            try:
+                return fn()
+            except KafkaException as exc:
+                if not exc.args[0].retriable() or attempt == TXN_ATTEMPTS:
+                    raise
+                log.warning("retriable transaction error (%s); attempt %d of %d", exc.args[0].str(),
+                            attempt, TXN_ATTEMPTS)
 
 
 def output_topics(enriched: EnrichedTicket, routes: Routes) -> list[str]:
@@ -97,16 +212,14 @@ def run_enricher(consumer, producer, source_topic: str, routes: Routes, *,
                  in_serde: TicketSerde, out_serde: EnrichedTicketSerde,
                  classify: Callable[[Ticket], Classification], should_stop: Callable[[], bool],
                  sleep: Callable[[float], bool], policy: RetryPolicy = RetryPolicy(),
-                 model: str = "unknown", batch_size: int = 4) -> EnricherStats:
+                 model: str = "unknown", batch_size: int = 4, transactional: bool = False,
+                 before_commit: Callable[[int], None] = lambda batch: None) -> EnricherStats:
     stats = EnricherStats()
-    delivery_errors: list = []
-
-    def on_delivery(err, msg):
-        if err is not None:
-            delivery_errors.append(err)
-
+    writer = Transactional(producer) if transactional else AtLeastOnce(producer)
+    writer.start()  # before subscribing: see Transactional.start
     # With cooperative-sticky these callbacks receive only the partitions that moved.
     consumer.subscribe([source_topic], on_assign=_log_assign, on_revoke=_log_revoke)
+    attempt = 0
     try:
         while not should_stop():
             # Small batches: every message may cost seconds of LLM time, and we must be back in
@@ -119,34 +232,27 @@ def run_enricher(consumer, producer, source_topic: str, routes: Routes, *,
                     messages.append(msg)
             if not messages:
                 continue
+            # Classify the whole batch first, with nothing written yet. Stopping (Ctrl-C during a
+            # retry wait) propagates from here: nothing of this batch is written or committed.
+            outputs: list[Output] = []
             for msg in messages:
-                # Stopping (Ctrl-C during a retry wait) propagates from here: nothing of this batch
-                # is committed, so it's all redone on restart — duplicates possible, loss impossible.
-                outputs = process(msg.value(), msg.key(), SourceRef(msg.topic(), msg.partition(), msg.offset()),
-                                  datetime.now(timezone.utc), in_serde=in_serde, out_serde=out_serde,
-                                  classify=classify, policy=policy, sleep=sleep, routes=routes, model=model)
-                for out in outputs:
-                    producer.produce(out.topic, key=out.key, value=out.value, headers=out.headers or None,
-                                     on_delivery=on_delivery)
-                    producer.poll(0)
-                if outputs[0].topic == routes.dlq:
+                out = process(msg.value(), msg.key(), SourceRef(msg.topic(), msg.partition(), msg.offset()),
+                              datetime.now(timezone.utc), in_serde=in_serde, out_serde=out_serde,
+                              classify=classify, policy=policy, sleep=sleep, routes=routes, model=model)
+                outputs.extend(out)
+                if out[0].topic == routes.dlq:
                     stats.dead_lettered += 1
                 else:
                     stats.enriched += 1
-                    stats.routed += len(outputs)
-
-            # 1) Wait until every output of this batch is acknowledged, 2) then commit the inputs.
-            remaining = producer.flush(30)
-            if remaining or delivery_errors:
-                raise RuntimeError(f"outputs not acknowledged ({remaining} pending, "
-                                   f"errors: {delivery_errors}); not committing")
-            if not commit_batch(consumer):
+                    stats.routed += len(out)
+            attempt += 1
+            if not writer.write(consumer, outputs, messages, lambda: before_commit(attempt)):
                 stats.commit_failures += 1
                 continue
             stats.batches += 1
-            log.info("batch done: %d messages (totals: %s)", len(messages), stats)
+            log.info("batch done (%s): %d messages (totals: %s)", writer.mode, len(messages), stats)
     except Stopping:
-        log.info("stopped mid-batch; its offsets were not committed and it will be redone")
+        log.info("stopped mid-batch; nothing of it was committed and it will be redone")
     finally:
         # Leave the group cleanly so the other instances take over our partitions right away.
         consumer.close()

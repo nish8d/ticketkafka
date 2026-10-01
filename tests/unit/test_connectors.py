@@ -66,6 +66,11 @@ def test_both_sinks_share_the_write_and_error_policy(connectors):
         # 60 x 5 s: Postgres may be down for 5 minutes before records spill into the DLQ.
         "max.retries": "60",
         "retry.backoff.ms": "5000",
+        # A lost connection takes another path: the sink reconnects connection.attempts times,
+        # connection.backoff.ms apart, then fails the task (no DLQ). 24 x 10 s ≈ 4 min stays under the
+        # sink consumer's max.poll.interval.ms (5 min), so the task isn't dropped from its group meanwhile.
+        "connection.attempts": "24",
+        "connection.backoff.ms": "10000",
         "errors.tolerance": "all",
         "errors.deadletterqueue.topic.name": config.TOPIC_SINK_DLQ,
         "errors.deadletterqueue.topic.replication.factor": "1",

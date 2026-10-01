@@ -259,7 +259,26 @@ def run_enricher(consumer, producer, source_topic: str, routes: Routes, *,
     return stats
 
 
-def main(argv: list[str] | None = None) -> None:
+def _positive_int(text: str) -> int:
+    value = int(text)
+    if value < 1:
+        raise argparse.ArgumentTypeError("must be 1 or more")
+    return value
+
+
+def crash_hook(crash_at: int | None, exit=os._exit) -> Callable[[int], None]:
+    """DEMO ONLY (--crash-before-commit): end the process abruptly on batch `crash_at`, after its
+    outputs are written and before they are committed — the one moment where at-least-once and
+    transactional runs differ. os._exit skips every cleanup, like a kill -9."""
+    def before_commit(batch: int) -> None:
+        if batch == crash_at:
+            log.warning("--crash-before-commit %d: exiting now; outputs written, nothing committed", batch)
+            logging.shutdown()
+            exit(1)
+    return before_commit
+
+
+def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Classify tickets.valid with the LLM and route them.")
     parser.add_argument("--group", default="enricher", help="consumer group id (same group = share the work)")
     parser.add_argument("--model", default=config.DEFAULT_MODEL, help="Ollama model name")
@@ -268,6 +287,12 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--max-poll-interval-ms", type=int, default=600_000)
     parser.add_argument("--schema-in", type=Path, default=config.DEFAULT_TICKET_SCHEMA)
     parser.add_argument("--schema-out", type=Path, default=config.ENRICHED_SCHEMA_V1)
+    parser.add_argument("--at-least-once", action="store_true",
+                        help="stage 5 mode: commit the offsets after the outputs, instead of in one transaction")
+    parser.add_argument("--instance", type=_positive_int, default=1,
+                        help="this enricher's number; transactional.id = enricher-N (one number per running enricher)")
+    parser.add_argument("--crash-before-commit", type=_positive_int, default=None, metavar="N",
+                        help="DEMO ONLY: exit abruptly on the Nth batch, after writing its outputs, before committing")
     args = parser.parse_args(argv)
     logging.basicConfig(level=logging.INFO,
                         format=f"%(asctime)s %(name)s[{os.getpid()}] %(levelname)s %(message)s")
@@ -285,16 +310,30 @@ def main(argv: list[str] | None = None) -> None:
     stop = install_stop_event()
     log.info("worst-case batch time %.0fs (max.poll.interval.ms = %ds)", worst, args.max_poll_interval_ms // 1000)
 
+    transactional_id = f"enricher-{args.instance}"
+    if args.at_least_once:
+        producer_conf = producer_config()
+        log.info("mode: at-least-once (stage 5)")
+    else:
+        producer_conf = transactional_producer_config(transactional_id)
+        log.info("mode: transactional, transactional.id=%s", transactional_id)
     consumer_conf = slow_consumer_config(args.group, args.max_poll_interval_ms)
     # client.id shows up in Kafka UI's consumer view, so you can tell the instances apart.
     consumer_conf["client.id"] = f"enricher-{os.getpid()}"
-    stats = run_enricher(Consumer(consumer_conf), Producer(producer_config()), config.TOPIC_VALID, routes,
-                         in_serde=in_serde, out_serde=out_serde,
-                         classify=lambda ticket: classify_ticket(client, args.model, ticket),
-                         should_stop=stop.is_set, sleep=interruptible_sleep(stop), policy=policy,
-                         model=args.model, batch_size=args.batch_size)
+    try:
+        stats = run_enricher(Consumer(consumer_conf), Producer(producer_conf), config.TOPIC_VALID, routes,
+                             in_serde=in_serde, out_serde=out_serde,
+                             classify=lambda ticket: classify_ticket(client, args.model, ticket),
+                             should_stop=stop.is_set, sleep=interruptible_sleep(stop), policy=policy,
+                             model=args.model, batch_size=args.batch_size, transactional=not args.at_least_once,
+                             before_commit=crash_hook(args.crash_before_commit))
+    except FatalTransactionError as exc:
+        log.error("fenced or otherwise unable to continue as %s (%s): is another enricher running with "
+                  "--instance %d? Nothing of the current batch was committed.", transactional_id, exc, args.instance)
+        return 1
     log.info("stopped: %s", stats)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

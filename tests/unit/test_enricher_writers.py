@@ -45,7 +45,7 @@ def _error(retriable=False, abort=False, fatal=False) -> KafkaException:
 
 
 class FakeTxnProducer:
-    """Records the transactional calls; `fail` queues exceptions per method name."""
+    """Records the transactional calls; `fail` queues exceptions per method name (None = succeed this time)."""
 
     def __init__(self, events=None, fail=None):
         self.events = events if events is not None else []
@@ -55,7 +55,9 @@ class FakeTxnProducer:
         self.events.append(entry or name)
         queue = self.fail.get(name)
         if queue:
-            raise queue.pop(0)
+            error = queue.pop(0)
+            if error is not None:
+                raise error
 
     def init_transactions(self, timeout=None):
         self._call("init_transactions", "init")
@@ -255,3 +257,26 @@ def test_run_enricher_keeps_going_after_an_aborted_batch(serde_v2, enriched_serd
     stats = _run(consumer, producer, serde_v2, enriched_serde, iter([False, False, False, True]), transactional=True)
     assert (stats.commit_failures, stats.batches) == (1, 1)  # aborted once, redone and committed
     assert consumer.seeks == [("tickets.valid", 0, 0)]
+
+
+def test_a_batch_that_keeps_aborting_stops_the_enricher():
+    # A persistent produce error (a missing output topic, an oversized record) aborts every attempt;
+    # redoing the batch for ever would re-run its LLM calls for ever. Crash instead, like at-least-once.
+    from pipeline.enricher import MAX_CONSECUTIVE_ABORTS
+
+    producer = FakeTxnProducer(fail={"commit_transaction": [_error(abort=True)] * MAX_CONSECUTIVE_ABORTS})
+    writer = Transactional(producer)
+    for _ in range(MAX_CONSECUTIVE_ABORTS - 1):
+        assert writer.write(FakeTxnConsumer(), OUTPUTS, BATCH, lambda: None) is False
+    with pytest.raises(RuntimeError, match=f"aborted {MAX_CONSECUTIVE_ABORTS} times in a row"):
+        writer.write(FakeTxnConsumer(), OUTPUTS, BATCH, lambda: None)
+
+
+def test_a_commit_resets_the_abort_count():
+    from pipeline.enricher import MAX_CONSECUTIVE_ABORTS
+
+    # abort, commit, then MAX-1 more aborts: never MAX in a row, so it keeps going.
+    plan = [_error(abort=True), None] + [_error(abort=True)] * (MAX_CONSECUTIVE_ABORTS - 1)
+    writer = Transactional(FakeTxnProducer(fail={"commit_transaction": list(plan)}))
+    results = [writer.write(FakeTxnConsumer(), OUTPUTS, BATCH, lambda: None) for _ in plan]
+    assert results == [False, True] + [False] * (MAX_CONSECUTIVE_ABORTS - 1)

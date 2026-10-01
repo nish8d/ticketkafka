@@ -112,6 +112,10 @@ class AtLeastOnce:
 
 
 TXN_ATTEMPTS = 3  # for errors the client marks retriable, such as a coordinator timeout
+# A rebalance aborts a batch now and then; the same batch aborting this many times in a row means
+# something persistent (a missing output topic, an oversized record): stop instead of redoing it,
+# and its LLM calls, for ever.
+MAX_CONSECUTIVE_ABORTS = 3
 
 
 class Transactional:
@@ -123,6 +127,7 @@ class Transactional:
 
     def __init__(self, producer, timeout: float = 30.0):
         self.producer, self.timeout = producer, timeout
+        self.consecutive_aborts = 0
 
     def start(self) -> None:
         # Fences any older producer with our transactional.id and aborts its unfinished transaction.
@@ -146,6 +151,7 @@ class Transactional:
             self.producer.flush(self.timeout)
             before_commit()
             self._call(lambda: self.producer.commit_transaction(self.timeout))
+            self.consecutive_aborts = 0
             return True
         except KafkaException as exc:
             error = exc.args[0]
@@ -155,6 +161,10 @@ class Transactional:
                 raise
             log.warning("transaction aborted (%s); rewinding to redo the batch", error.str())
             self._call(lambda: self.producer.abort_transaction(self.timeout))
+            self.consecutive_aborts += 1
+            if self.consecutive_aborts >= MAX_CONSECUTIVE_ABORTS:
+                raise RuntimeError(f"batch aborted {self.consecutive_aborts} times in a row (last: {error.str()}); "
+                                   "stopping instead of redoing it for ever") from exc
             rewind(consumer, messages)
             return False
 

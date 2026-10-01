@@ -298,3 +298,18 @@ def test_delete_mentions_that_the_offsets_stay(capsys):
     assert main(["delete", "tickets-sink"], client=ConnectClient("http://c:8083", http=http)) == 0
     assert http.calls[0][:2] == ("DELETE", "http://c:8083/connectors/tickets-sink")
     assert "connect-tickets-sink" in capsys.readouterr().out
+
+
+def test_status_of_a_connector_that_exists_but_has_not_started_is_not_a_failure(capsys):
+    # Right after `apply`, Connect knows the connector but has no status record for it yet: 404.
+    not_yet = _Response(404, {"error_code": 404, "message": "No status found for connector tickets-sink"})
+    http = _FakeHttp(not_yet, _Response(200, ["stats-sink", "tickets-sink"]))
+    assert main(["status", "tickets-sink"], client=ConnectClient("http://c:8083", http=http)) == 0
+    assert capsys.readouterr().out.splitlines() == ["tickets-sink: created, not started yet"]
+
+
+def test_status_of_an_unknown_connector_exits_1(capsys):
+    unknown = _Response(404, {"error_code": 404, "message": "No status found for connector nope"})
+    http = _FakeHttp(unknown, _Response(200, ["stats-sink", "tickets-sink"]))
+    assert main(["status", "nope"], client=ConnectClient("http://c:8083", http=http)) == 1
+    assert "No status found for connector nope" in capsys.readouterr().err

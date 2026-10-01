@@ -22,7 +22,9 @@ REQUIRED_KEYS: tuple[str, ...] = ("connector.class", "topics", "connection.url",
 
 
 class ConnectorError(RuntimeError):
-    pass
+    def __init__(self, message: str, status_code: int | None = None):
+        super().__init__(message)
+        self.status_code = status_code
 
 
 @dataclass(frozen=True)
@@ -124,7 +126,7 @@ class ConnectClient:
                 message = response.json().get("message", response.text)
             except ValueError:
                 message = response.text
-            raise ConnectorError(f"{what}: Connect answered {response.status_code}: {message}")
+            raise ConnectorError(f"{what}: Connect answered {response.status_code}: {message}", response.status_code)
         return response
 
 
@@ -164,7 +166,14 @@ def _run(args, client: ConnectClient, tables) -> int:
         return 0
     failed = False
     for name in names:
-        status = client.status(name)
+        try:
+            status = client.status(name)
+        except ConnectorError as exc:
+            # Right after `apply`, Connect knows the connector before it has written its first status.
+            if exc.status_code == 404 and name in client.names():
+                print(f"{name}: created, not started yet")
+                continue
+            raise
         print("\n".join(format_status(status)))
         failed = failed or has_failed(status)
     return 1 if failed else 0

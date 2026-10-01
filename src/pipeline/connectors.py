@@ -19,8 +19,6 @@ from pipeline import config
 # Every sink file must set these; anything else falls back to Connect's or the plugin's defaults.
 REQUIRED_KEYS: tuple[str, ...] = ("connector.class", "topics", "connection.url", "table.name.format",
                                   "insert.mode", "pk.mode", "pk.fields")
-# A failed task's trace is a Java stack trace; its first lines say what went wrong.
-TRACE_LINES = 5
 
 
 class ConnectorError(RuntimeError):
@@ -67,11 +65,13 @@ def existing_tables(dsn: str) -> set[str]:
 
 
 def _trace(state: dict) -> list[str]:
+    """A failed task's Java trace, cut to what failed (its first line) and why (its "Caused by" chain).
+    The stack frames in between rarely help, and the root cause is usually the last "Caused by"."""
     lines = (state.get("trace") or "").splitlines()
-    shown = [f"      {line}" for line in lines[:TRACE_LINES]]
-    if len(lines) > TRACE_LINES:
-        shown.append(f"      … {len(lines) - TRACE_LINES} more lines (docker compose logs connect)")
-    return shown
+    if not lines:
+        return []
+    shown = [lines[0], *(line for line in lines[1:] if line.startswith("Caused by:"))]
+    return [f"      {line}" for line in shown] + ["      (full trace: docker compose logs connect)"]
 
 
 def format_status(status: dict) -> list[str]:

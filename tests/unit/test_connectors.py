@@ -138,14 +138,26 @@ def test_format_status_running():
     assert not has_failed(RUNNING)
 
 
-def test_format_status_shows_the_start_of_a_failed_tasks_trace():
-    trace = "\n".join(f"line {i}" for i in range(1, 9))
-    status = {**RUNNING, "tasks": [{"id": 0, "state": "FAILED", "worker_id": "connect:8083", "trace": trace}]}
+JAVA_TRACE = """org.apache.kafka.connect.errors.ConnectException: Exiting WorkerSinkTask due to unrecoverable exception.
+\tat org.apache.kafka.connect.runtime.WorkerSinkTask.deliverMessages(WorkerSinkTask.java:658)
+\tat org.apache.kafka.connect.runtime.WorkerSinkTask.poll(WorkerSinkTask.java:359)
+Caused by: org.apache.kafka.connect.errors.ConnectException: org.postgresql.util.PSQLException: The connection attempt failed.
+\tat io.confluent.connect.jdbc.util.CachedConnectionProvider.getConnection(CachedConnectionProvider.java:62)
+\t... 11 more
+Caused by: java.net.UnknownHostException: postgres
+\t... 24 more"""
+
+
+def test_format_status_shows_what_failed_and_why_without_the_stack_frames():
+    # The useful part of a Java trace is its first line and its "Caused by" chain, not the frames.
+    status = {**RUNNING, "tasks": [{"id": 0, "state": "FAILED", "worker_id": "connect:8083", "trace": JAVA_TRACE}]}
     assert format_status(status) == [
         "tickets-sink (sink): RUNNING on connect:8083",
         "  task 0: FAILED on connect:8083",
-        "      line 1", "      line 2", "      line 3", "      line 4", "      line 5",
-        "      … 3 more lines (docker compose logs connect)",
+        "      org.apache.kafka.connect.errors.ConnectException: Exiting WorkerSinkTask due to unrecoverable exception.",
+        "      Caused by: org.apache.kafka.connect.errors.ConnectException: org.postgresql.util.PSQLException: The connection attempt failed.",
+        "      Caused by: java.net.UnknownHostException: postgres",
+        "      (full trace: docker compose logs connect)",
     ]
     assert has_failed(status)
 

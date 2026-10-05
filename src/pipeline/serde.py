@@ -28,6 +28,11 @@ class SchemaNotRegistered(RuntimeError):
     pass
 
 
+class RegistryUnavailable(RuntimeError):
+    """The registry gave an answer that isn't about the message (e.g. a 2xx with a body that isn't JSON).
+    Deliberately not a ValueError: the services dead-letter every ValueError, and this must crash them."""
+
+
 def load_schema(path: Path) -> str:
     # Stripped because the serializer strips too: registry lookups then match the string exactly.
     return Path(path).read_text().strip()
@@ -101,6 +106,10 @@ class AvroSerde:
             if exc.error_code in _NOT_FOUND_CODES:
                 raise UndecodableMessage(f"unknown schema id {schema_id}: {exc}") from exc
             raise
+        except ValueError as exc:
+            # e.g. json.JSONDecodeError from a proxy's HTML page: the registry's fault, not the message's.
+            raise RegistryUnavailable(f"schema registry gave an unusable answer for schema id {schema_id}: "
+                                      f"{type(exc).__name__}: {exc}") from exc
         try:
             record = self._deserializer(value, SerializationContext(topic, MessageField.VALUE))
         except Exception as exc:

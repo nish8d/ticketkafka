@@ -150,3 +150,19 @@ def test_run_validator_keeps_going_when_a_commit_fails_after_a_rebalance(serde_v
                           should_stop=lambda: next(rounds))
     assert (stats.valid, stats.batches, stats.commit_failures) == (1, 0, 1)
     assert consumer.closed
+
+
+def test_route_propagates_a_registry_that_answers_garbage(mock_registry, ticket, monkeypatch):
+    # The registry client raises a JSONDecodeError (a ValueError) for a 2xx with a non-JSON body.
+    import json
+
+    value = TicketSerde(mock_registry, load_schema(config.TICKET_SCHEMA_V2)).encode(ticket, "tickets.raw")
+    fresh = TicketSerde(mock_registry, load_schema(config.TICKET_SCHEMA_V2))
+
+    def garbage(*args, **kwargs):
+        raise json.JSONDecodeError("Expecting value", "<html>", 0)
+
+    monkeypatch.setattr(mock_registry, "get_schema", garbage)
+    with pytest.raises(Exception) as excinfo:
+        _route(value, fresh)
+    assert not isinstance(excinfo.value, ValueError)  # crashed, not dead-lettered

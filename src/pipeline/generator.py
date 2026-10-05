@@ -2,6 +2,7 @@
 import argparse
 import logging
 import random
+import sys
 import time
 import uuid
 from dataclasses import dataclass
@@ -45,6 +46,7 @@ class GeneratorStats:
     delivered: int = 0
     delivery_failed: int = 0
     llm_failed: int = 0
+    gave_up: bool = False  # stopped early: the LLM failed max_llm_failures times in a row
 
 
 def tier_for(customer_id: str) -> Tier:
@@ -112,8 +114,10 @@ def run_generator(
     should_stop: Callable[[], bool] = lambda: False,
     llm_backoff: float = 1.0,
     sleep: Callable[[float], None] = time.sleep,
+    max_llm_failures: int = 10,
 ) -> GeneratorStats:
     stats = GeneratorStats()
+    failures_in_a_row = 0
 
     # Called from producer.poll()/flush() once the broker has acked (or rejected) a message.
     def on_delivery(err, msg):
@@ -133,9 +137,18 @@ def run_generator(
             text = text_source(seed)
         except LLMError as exc:
             stats.llm_failed += 1
+            failures_in_a_row += 1
+            if failures_in_a_row >= max_llm_failures:
+                # Ollama down, or the model not pulled: every call will fail, so --count would never
+                # be reached. Stop instead of retrying for ever.
+                log.error("LLM failed %d times in a row (last: %s); giving up. Is Ollama running, and is "
+                          "the model pulled?", failures_in_a_row, exc)
+                stats.gave_up = True
+                break
             log.warning("LLM failed, skipping this ticket: %s", exc)
             sleep(llm_backoff)
             continue
+        failures_in_a_row = 0
 
         ticket = build_ticket(seed, text, datetime.now(timezone.utc))
         # produce() only queues the message; it's sent in the background in batches.
@@ -185,7 +198,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def main(argv: list[str] | None = None) -> None:
+def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
     should_stop = install_stop_handler()
@@ -201,7 +214,8 @@ def main(argv: list[str] | None = None) -> None:
     stats = run_generator(Producer(producer_config()), text_source, args.topic, args.count, args.rate,
                           args.bad_ratio, random.Random(args.seed), serde, should_stop=should_stop)
     log.info("done: %s", stats)
+    return 1 if stats.gave_up else 0
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())

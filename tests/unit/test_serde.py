@@ -225,9 +225,11 @@ def test_registry_answers_that_are_not_about_the_message_propagate(mock_registry
         raise error
 
     monkeypatch.setattr(mock_registry, "get_schema", broken)
-    with pytest.raises(type(error)) as excinfo:
+    with pytest.raises(Exception) as excinfo:
         fresh.decode(value, avro_topic)
-    assert not isinstance(excinfo.value, UndecodableMessage)  # infra trouble must not be dead-lettered
+    # Infra trouble must not be dead-lettered, and the services dead-letter every ValueError
+    # (UndecodableMessage, pydantic's ValidationError, tombstones). So it must not be a ValueError at all.
+    assert not isinstance(excinfo.value, ValueError)
 
 
 def test_ensure_registered_propagates_a_404_that_is_not_from_the_registry(mock_registry, avro_topic, monkeypatch):

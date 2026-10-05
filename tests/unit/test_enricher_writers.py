@@ -178,7 +178,7 @@ def test_retriable_error_gives_up_after_the_last_attempt():
     with pytest.raises(KafkaException):
         Transactional(producer).write(FakeTxnConsumer(), OUTPUTS, BATCH, lambda: None)
     assert producer.events.count("commit") == TXN_ATTEMPTS
-    assert "abort" not in producer.events
+    assert producer.events[-1] == "abort"  # not left open for read_committed readers to wait on
 
 
 def test_fatal_error_stops_without_aborting_or_rewinding():
@@ -189,11 +189,22 @@ def test_fatal_error_stops_without_aborting_or_rewinding():
     assert "abort" not in producer.events and consumer.seeks == []
 
 
-def test_other_errors_propagate():
+def test_other_errors_abort_the_open_transaction_then_propagate():
+    # Left open, the transaction would hold back every read_committed reader of those partitions
+    # until transaction.timeout.ms (60 s).
     producer = FakeTxnProducer(fail={"send_offsets_to_transaction": [_error()]})
-    with pytest.raises(KafkaException):
+    with pytest.raises(KafkaException, match="boom"):
         Transactional(producer).write(FakeTxnConsumer(), OUTPUTS, BATCH, lambda: None)
     assert "commit" not in producer.events
+    assert producer.events[-1] == "abort"
+
+
+def test_a_failing_abort_does_not_hide_the_original_error():
+    producer = FakeTxnProducer(fail={"commit_transaction": [_error(retriable=True)] * TXN_ATTEMPTS,
+                                     "abort_transaction": [_error()]})
+    with pytest.raises(KafkaException) as excinfo:
+        Transactional(producer).write(FakeTxnConsumer(), OUTPUTS, BATCH, lambda: None)
+    assert excinfo.value.args[0].retriable()  # the commit's error, not the abort's
 
 
 # --- the at-least-once writer ----------------------------------------------------------------------
@@ -268,7 +279,9 @@ def test_a_batch_that_keeps_aborting_stops_the_enricher():
     writer = Transactional(producer)
     for _ in range(MAX_CONSECUTIVE_ABORTS - 1):
         assert writer.write(FakeTxnConsumer(), OUTPUTS, BATCH, lambda: None) is False
-    with pytest.raises(RuntimeError, match=f"aborted {MAX_CONSECUTIVE_ABORTS} times in a row"):
+    from pipeline.enricher import TransactionGaveUp
+
+    with pytest.raises(TransactionGaveUp, match=f"aborted {MAX_CONSECUTIVE_ABORTS} times in a row"):
         writer.write(FakeTxnConsumer(), OUTPUTS, BATCH, lambda: None)
 
 

@@ -55,6 +55,10 @@ class FatalTransactionError(RuntimeError):
     """The transactional producer can't go on — usually fenced by a newer instance with our transactional.id."""
 
 
+class TransactionGaveUp(RuntimeError):
+    """The same batch aborted MAX_CONSECUTIVE_ABORTS times in a row: something persistent is wrong."""
+
+
 def next_offsets(messages) -> list[TopicPartition]:
     """The offsets a finished batch commits: per partition, one past the highest offset consumed."""
     highest: dict[tuple[str, int], int] = {}
@@ -158,15 +162,26 @@ class Transactional:
             if error.fatal():
                 raise FatalTransactionError(error.str()) from exc
             if not error.txn_requires_abort():
+                # Not ours to retry (e.g. retries used up). Abort first: a transaction left open holds
+                # back every read_committed reader of its partitions until transaction.timeout.ms.
+                self._abort_quietly()
                 raise
             log.warning("transaction aborted (%s); rewinding to redo the batch", error.str())
             self._call(lambda: self.producer.abort_transaction(self.timeout))
             self.consecutive_aborts += 1
             if self.consecutive_aborts >= MAX_CONSECUTIVE_ABORTS:
-                raise RuntimeError(f"batch aborted {self.consecutive_aborts} times in a row (last: {error.str()}); "
-                                   "stopping instead of redoing it for ever") from exc
+                raise TransactionGaveUp(f"batch aborted {self.consecutive_aborts} times in a row (last: "
+                                        f"{error.str()}); stopping instead of redoing it for ever") from exc
             rewind(consumer, messages)
             return False
+
+    def _abort_quietly(self) -> None:
+        """Best effort, on the way out: a failure here must not hide the error that got us here."""
+        try:
+            self.producer.abort_transaction(self.timeout)
+        except KafkaException as exc:
+            log.warning("could not abort the transaction (%s); the broker will after transaction.timeout.ms",
+                        exc.args[0].str())
 
     def _call(self, fn):
         for attempt in range(1, TXN_ATTEMPTS + 1):
@@ -341,6 +356,10 @@ def main(argv: list[str] | None = None) -> int:
                              should_stop=stop.is_set, sleep=interruptible_sleep(stop), policy=policy,
                              model=args.model, batch_size=args.batch_size, transactional=not args.at_least_once,
                              before_commit=crash_hook(args.crash_before_commit))
+    except TransactionGaveUp as exc:
+        log.error("%s. Is an output topic missing (run pipeline.admin) or a record too large? Nothing of the "
+                  "current batch was committed.", exc)
+        return 1
     except FatalTransactionError as exc:
         log.error("fenced or otherwise unable to continue as %s (%s): is another enricher running with "
                   "--instance %d? Nothing of the current batch was committed.", transactional_id, exc, args.instance)

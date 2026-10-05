@@ -81,3 +81,15 @@ def test_no_crash_hook_by_default():
 def test_numbers_must_be_positive(flag):
     with pytest.raises(SystemExit):
         main([flag, "0"])
+
+
+def test_main_exits_1_with_a_message_when_batches_keep_aborting(started, monkeypatch, caplog):
+    from pipeline.enricher import TransactionGaveUp
+
+    def gave_up(*args, **kwargs):
+        raise TransactionGaveUp("batch aborted 3 times in a row (last: Local: Erroneous state)")
+
+    monkeypatch.setattr(enricher, "run_enricher", gave_up)
+    with caplog.at_level(logging.ERROR, logger="enricher"):
+        assert main([]) == 1
+    assert "aborted 3 times in a row" in caplog.text

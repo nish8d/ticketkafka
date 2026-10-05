@@ -158,3 +158,46 @@ def test_main_refuses_to_start_when_the_schema_is_not_registered(monkeypatch):
     monkeypatch.setattr(generator, "run_generator", lambda *a, **kw: pytest.fail("generated without a schema"))
     with pytest.raises(SchemaNotRegistered, match="pipeline.schemas register"):
         generator.main(["--count", "1"])
+
+
+def test_run_generator_gives_up_after_too_many_llm_failures_in_a_row(fake_producer, serde_v2, avro_topic):
+    # With Ollama down (or the model not pulled) every call fails: without a limit, --count N would
+    # never finish.
+    calls = []
+
+    def down(seed):
+        calls.append(seed)
+        raise LLMError("ollama call failed: connection refused")
+
+    stats = run_generator(fake_producer, down, avro_topic, count=5, rate=1000, bad_ratio=0.0,
+                          rng=random.Random(1), serde=serde_v2, sleep=lambda s: None, max_llm_failures=3)
+    assert len(calls) == 3
+    assert (stats.produced, stats.llm_failed, stats.gave_up) == (0, 3, True)
+
+
+def test_a_success_resets_the_llm_failure_count(fake_producer, serde_v2, avro_topic):
+    down = LLMError("ollama call failed: timeout")
+    outcomes = [down, down, TEXT, down, down, TEXT]  # never 3 in a row
+
+    def flaky(seed):
+        outcome = outcomes.pop(0)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    stats = run_generator(fake_producer, flaky, avro_topic, count=2, rate=1000, bad_ratio=0.0,
+                          rng=random.Random(1), serde=serde_v2, sleep=lambda s: None, max_llm_failures=3)
+    assert (stats.produced, stats.llm_failed, stats.gave_up) == (2, 4, False)
+
+
+def test_main_exits_1_when_the_generator_gives_up(monkeypatch, mock_registry):
+    from pipeline import generator
+
+    monkeypatch.setattr(generator, "make_registry", lambda url: mock_registry)
+    monkeypatch.setattr(generator, "install_stop_handler", lambda: (lambda: False))
+    monkeypatch.setattr(generator, "Producer", lambda conf: None)
+    monkeypatch.setattr(generator, "run_generator",
+                        lambda *a, **kw: generator.GeneratorStats(llm_failed=10, gave_up=True))
+    assert generator.main(["--count", "1"]) == 1
+    monkeypatch.setattr(generator, "run_generator", lambda *a, **kw: generator.GeneratorStats(produced=1))
+    assert generator.main(["--count", "1"]) == 0

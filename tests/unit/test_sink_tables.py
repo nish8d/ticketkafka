@@ -32,4 +32,6 @@ def test_extra_columns_are_only_ones_the_smt_or_postgres_fills(sink_tables):
 
 def test_primary_keys_are_the_upsert_keys(sink_tables):
     assert sink_tables["tickets"][1] == ("ticket_id",)
-    assert sink_tables["ticket_stats"][1] == ("dimension", "value", "window_start")
+    # window_end too: rows for the same start but a different window size (a replay with another
+    # --window-seconds) are different facts and must not overwrite each other.
+    assert sink_tables["ticket_stats"][1] == ("dimension", "value", "window_start", "window_end")

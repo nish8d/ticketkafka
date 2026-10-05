@@ -11,7 +11,7 @@
     "table.name.format": "ticket_stats",
     "insert.mode": "upsert",
     "pk.mode": "record_value",
-    "pk.fields": "dimension,value,window_start",
+    "pk.fields": "dimension,value,window_start,window_end",
     "auto.create": "false",
     "auto.evolve": "false",
     "max.retries": "60",

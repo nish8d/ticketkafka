@@ -240,3 +240,25 @@ def test_a_window_emitted_twice_is_one_row_with_the_last_count(
     assert len(rows) == 1
     assert rows[0]["count"] == 5
     assert rows[0]["loaded_at"] == first["loaded_at"]
+
+
+def test_windows_with_the_same_start_but_a_different_size_are_separate_rows(
+        make_topic, register_schema, make_table, run_sink, producer, registry, pg):
+    # A replay with another --window-seconds emits windows that start at the same instant but end
+    # elsewhere; they are different facts and must not overwrite each other.
+    stats_topic, dlq = make_topic("sink.stats"), make_topic("sink.dlq")
+    register_schema(stats_topic, config.STATS_SCHEMA_V1)
+    table = make_table("ticket_stats")
+    serde = TicketStatsSerde(registry, load_schema(config.STATS_SCHEMA_V1))
+    start = datetime(2026, 10, 1, 12, 0, tzinfo=UTC)
+    for minutes, count in ((5, 3), (1, 1)):
+        row = TicketStats(dimension="category", value="billing", window_start=start,
+                          window_end=start + timedelta(minutes=minutes), count=count)
+        producer.produce(stats_topic, key=b"category=billing", value=serde.encode(row, stats_topic))
+    assert producer.flush(10) == 0
+
+    run_sink("stats-sink", {"topics": stats_topic, "table.name.format": table,
+                            "errors.deadletterqueue.topic.name": dlq})
+    rows = _wait_for(lambda: _rows(pg, table), lambda rows: len(rows) == 2)
+    assert sorted((r["window_end"] - r["window_start"], r["count"]) for r in rows) == [
+        (timedelta(minutes=1), 1), (timedelta(minutes=5), 3)]

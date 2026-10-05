@@ -32,5 +32,7 @@ CREATE TABLE ticket_stats (
     window_end    TIMESTAMPTZ NOT NULL,
     count         BIGINT NOT NULL,
     loaded_at     TIMESTAMPTZ NOT NULL DEFAULT now(),
-    PRIMARY KEY (dimension, value, window_start)      -- a window emitted twice upserts to one row
+    -- A window emitted twice upserts to one row; window_end too, so windows of another size that start
+    -- at the same instant (a replay with a different --window-seconds) don't overwrite each other.
+    PRIMARY KEY (dimension, value, window_start, window_end)
 );
